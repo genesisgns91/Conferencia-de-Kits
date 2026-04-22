@@ -16,22 +16,22 @@ import {
   updateDoc, deleteDoc, query, where, orderBy, onSnapshot, serverTimestamp, Timestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
-// ═══════════════════════════════════════════════
-//  FIREBASE CONFIG — substitua pelos seus dados
-// ═══════════════════════════════════════════════
+
+// ============================================================
+// FIREBASE CONFIG
+// ============================================================
 const firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
-  authDomain: "YOUR_PROJECT.firebaseapp.com",
-  projectId: "YOUR_PROJECT_ID",
-  storageBucket: "YOUR_PROJECT.appspot.com",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId: "YOUR_APP_ID"
+  apiKey: "AIzaSyAGwydedU1gVpT2fD9pOJVPyVY2EUJHUqk",
+  authDomain: "kitcontrol-smc.firebaseapp.com",
+  projectId: "kitcontrol-smc",
+  storageBucket: "kitcontrol-smc.firebasestorage.app",
+  messagingSenderId: "469557672542",
+  appId: "1:469557672542:web:e7bff7ff9ff8ad98d692cf"
 };
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
-const db   = getFirestore(app);
-
+const db = getFirestore(app);
 // ═══════════════════════════════════════════════
 //  GLOBALS
 // ═══════════════════════════════════════════════
