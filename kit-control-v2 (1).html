@@ -1,0 +1,1741 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KitControl — Magius</title>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import {
+  getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword,
+  sendPasswordResetEmail, onAuthStateChanged, signOut
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
+  getFirestore, collection, doc, addDoc, setDoc, getDoc, getDocs,
+  updateDoc, deleteDoc, query, where, orderBy, onSnapshot, serverTimestamp, Timestamp
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+// ═══════════════════════════════════════════════
+//  FIREBASE CONFIG — substitua pelos seus dados
+// ═══════════════════════════════════════════════
+const firebaseConfig = {
+  apiKey: "AIzaSyAGwydedU1gVpT2fD9pOJVPyVY2EUJHUqk",
+  authDomain: "kitcontrol-smc.firebaseapp.com",
+  projectId: "kitcontrol-smc",
+  storageBucket: "kitcontrol-smc.firebasestorage.app",
+  messagingSenderId: "469557672542",
+  appId: "1:469557672542:web:e7bff7ff9ff8ad98d692cf"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db   = getFirestore(app);
+
+// ═══════════════════════════════════════════════
+//  GLOBALS
+// ═══════════════════════════════════════════════
+let currentUser     = null;
+let currentUserData = null;
+let masterActive    = false;       // acesso master temporário
+let originalPermissao = null;      // permissão real antes do master
+const MASTER_PASSWORD = "LOG#001";
+
+// ═══════════════════════════════════════════════
+//  UTILS
+// ═══════════════════════════════════════════════
+function fmtDate(d){
+  if(!d)return"";if(d.toDate)d=d.toDate();
+  return`${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getFullYear()).slice(-2)}`;
+}
+function fmtTime(d){
+  if(!d)return"";if(d.toDate)d=d.toDate();
+  return`${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+}
+function fmtLeadTime(ms){
+  if(!ms||ms<0)return"—";
+  const totalMin=Math.floor(ms/60000);
+  const days=Math.floor(totalMin/1440),hours=Math.floor((totalMin%1440)/60),mins=totalMin%60;
+  return`${days}d | ${String(hours).padStart(2,"0")}:${String(mins).padStart(2,"0")}`;
+}
+function fmtDateInput(d){
+  if(!d)return"";if(d.toDate)d=d.toDate();
+  return d.toISOString().split("T")[0];
+}
+// HH:MM → minutos
+function hmToMinutes(str){
+  if(!str)return 0;
+  const p=str.split(":");
+  return parseInt(p[0]||0)*60+parseInt(p[1]||0);
+}
+// HH:MM:SS → minutos
+function hmsToMinutes(str){
+  if(!str)return 0;
+  const p=str.split(":");
+  return parseInt(p[0]||0)*60+parseInt(p[1]||0)+parseInt(p[2]||0)/60;
+}
+// minutos → "Xd | HH:MM"
+function minToLeadFmt(totalMin){
+  const days=Math.floor(totalMin/1440),hours=Math.floor((totalMin%1440)/60),mins=Math.round(totalMin%60);
+  return`${days}d | ${String(hours).padStart(2,"0")}:${String(mins).padStart(2,"0")}`;
+}
+// minutos → "Xd Xh Xmin"
+function minToVerbose(totalMin){
+  const days=Math.floor(totalMin/1440),hours=Math.floor((totalMin%1440)/60),mins=Math.round(totalMin%60);
+  return`${days}d ${hours}h ${mins}min`;
+}
+function showToast(msg,type="info"){
+  const t=document.createElement("div");
+  t.className=`toast toast-${type}`;t.textContent=msg;
+  document.getElementById("toast-container").appendChild(t);
+  setTimeout(()=>t.classList.add("show"),10);
+  setTimeout(()=>{t.classList.remove("show");setTimeout(()=>t.remove(),400);},3500);
+}
+function loading(show){document.getElementById("global-loading").style.display=show?"flex":"none";}
+
+function effectivePerm(){
+  if(masterActive)return"adm_master";
+  return currentUserData?.permissao||"visualizador";
+}
+function can(action){
+  const p=effectivePerm();
+  if(p==="adm_master")return true;
+  if(action==="visualizar")return true;
+  if(p==="visualizador")return false;
+  if(action==="operar")return["operador","adm_basico"].includes(p);
+  if(action==="editar_endereco")return["operador","adm_basico"].includes(p);
+  if(action==="editar_tudo")return["adm_basico"].includes(p);
+  if(action==="excluir")return["adm_basico"].includes(p);
+  if(action==="indicadores")return["adm_basico"].includes(p);
+  if(action==="gerenciar_usuarios")return false;
+  return false;
+}
+
+// uppercase em inputs
+function toUpper(el){el.value=el.value.toUpperCase();}
+
+// ═══════════════════════════════════════════════
+//  NAVIGATION
+// ═══════════════════════════════════════════════
+function navigate(screen){
+  document.querySelectorAll(".screen").forEach(s=>s.classList.remove("active"));
+  document.querySelectorAll(".nav-btn").forEach(b=>b.classList.remove("active"));
+  const el=document.getElementById(`screen-${screen}`);
+  if(el)el.classList.add("active");
+  const nb=document.querySelector(`[data-nav="${screen}"]`);
+  if(nb)nb.classList.add("active");
+  if(screen==="kits")loadKitsTable();
+  if(screen==="historico")loadHistoricoTable();
+  if(screen==="divergencias")loadDivergenciasTable();
+  if(screen==="cadastros")loadCadastros();
+  if(screen==="usuarios")loadUsuarios();
+  if(screen==="indicadores")loadIndicadores();
+}
+window.navigate=navigate;
+
+// ═══════════════════════════════════════════════
+//  AUTH
+// ═══════════════════════════════════════════════
+onAuthStateChanged(auth,async user=>{
+  if(user){
+    currentUser=user;
+    const snap=await getDoc(doc(db,"usuarios",user.uid));
+    if(snap.exists()){
+      currentUserData=snap.data();
+      masterActive=false;
+      showApp();
+      navigate("kits");
+    } else { await signOut(auth); showLogin(); }
+  } else { currentUser=null; currentUserData=null; masterActive=false; showLogin(); }
+});
+
+function showLogin(){
+  document.getElementById("auth-section").style.display="flex";
+  document.getElementById("app-section").style.display="none";
+  showAuthPanel("login");
+}
+function showApp(){
+  document.getElementById("auth-section").style.display="none";
+  document.getElementById("app-section").style.display="flex";
+  document.getElementById("user-name-display").textContent=currentUserData?.nome||currentUser?.email;
+  document.getElementById("user-turno-display").textContent=currentUserData?.turno||"";
+  updateNavVisibility();
+}
+function updateNavVisibility(){
+  const p=effectivePerm();
+  document.getElementById("nav-usuarios").style.display=p==="adm_master"?"flex":"none";
+  document.getElementById("nav-indicadores").style.display=(p==="adm_basico"||p==="adm_master")?"flex":"none";
+  const masterBtn=document.getElementById("btn-master");
+  const revertBtn=document.getElementById("btn-revert-master");
+  if(masterActive){masterBtn.style.display="none";revertBtn.style.display="inline-flex";}
+  else{masterBtn.style.display="inline-flex";revertBtn.style.display="none";}
+}
+window.showAuthPanel=function(panel){
+  document.querySelectorAll(".auth-panel").forEach(p=>p.style.display="none");
+  document.getElementById(`auth-${panel}`).style.display="block";
+};
+
+window.doLogin=async function(){
+  const email=document.getElementById("login-email").value.trim();
+  const pass=document.getElementById("login-pass").value;
+  if(!email||!pass)return showToast("Preencha email e senha","warning");
+  loading(true);
+  try{ await signInWithEmailAndPassword(auth,email,pass); }
+  catch(e){ showToast("Email ou senha inválidos","error"); }
+  loading(false);
+};
+
+window.doRegister=async function(){
+  const nome=document.getElementById("reg-nome").value.trim();
+  const email=document.getElementById("reg-email").value.trim();
+  const pass=document.getElementById("reg-pass").value;
+  const pass2=document.getElementById("reg-pass2").value;
+  const turno=document.getElementById("reg-turno").value;
+  if(!nome||!email||!pass||!pass2||!turno)return showToast("Preencha todos os campos","warning");
+  if(pass!==pass2)return showToast("Senhas não coincidem","error");
+  if(pass.length<6)return showToast("Senha mínimo 6 caracteres","warning");
+  loading(true);
+  try{
+    const cred=await createUserWithEmailAndPassword(auth,email,pass);
+    await setDoc(doc(db,"usuarios",cred.user.uid),{nome,email,turno,permissao:"operador",criadoEm:serverTimestamp()});
+    showToast("Cadastro realizado!","success");
+  }catch(e){showToast(e.message,"error");}
+  loading(false);
+};
+
+window.doForgotPassword=async function(){
+  const email=document.getElementById("forgot-email").value.trim();
+  if(!email)return showToast("Informe o email","warning");
+  try{ await sendPasswordResetEmail(auth,email); showToast("Email enviado!","success"); showAuthPanel("login"); }
+  catch(e){showToast("Erro ao enviar email","error");}
+};
+
+window.doLogout=async function(){ await signOut(auth); };
+
+// ═══════════════════════════════════════════════
+//  MASTER TEMPORÁRIO
+// ═══════════════════════════════════════════════
+window.openMasterModal=function(){document.getElementById("modal-master").style.display="flex";};
+window.closeMasterModal=function(){document.getElementById("modal-master").style.display="none";};
+window.applyMasterPassword=async function(){
+  const pass=document.getElementById("master-pass-input").value;
+  if(pass===MASTER_PASSWORD){
+    if(!masterActive){ originalPermissao=currentUserData.permissao; }
+    masterActive=true;
+    showToast("Acesso Master TEMPORÁRIO ativado","success");
+    closeMasterModal();
+    updateNavVisibility();
+    navigate("usuarios");
+  } else { showToast("Senha incorreta","error"); }
+  document.getElementById("master-pass-input").value="";
+};
+window.revertMaster=function(){
+  masterActive=false;
+  showToast("Acesso Master encerrado — permissão original restaurada","info");
+  updateNavVisibility();
+  navigate("kits");
+};
+
+// ═══════════════════════════════════════════════
+//  KITS — RECEBIMENTO
+// ═══════════════════════════════════════════════
+window.submitRecebimento=async function(){
+  const checklist=document.getElementById("rec-checklist").value.trim().toUpperCase();
+  const noop=document.getElementById("rec-noop").value.trim().toUpperCase();
+  const refpai=document.getElementById("rec-refpai").value.trim().toUpperCase();
+  const qtdkit=parseInt(document.getElementById("rec-qtdkit").value);
+  const volumes=parseInt(document.getElementById("rec-volumes").value);
+  const endereco=document.getElementById("rec-endereco").value.trim().toUpperCase();
+  const dataprev=document.getElementById("rec-dataprev").value;
+  if(!checklist||!noop||!refpai||!qtdkit||!volumes||!endereco||!dataprev)
+    return showToast("Preencha todos os campos obrigatórios","warning");
+
+  const snap=await getDocs(query(collection(db,"kits_aguardando"),where("checklist","==",checklist)));
+  if(!snap.empty)return showToast("Checklist já existe em KITS AGUARDANDO","error");
+  const snap2=await getDocs(query(collection(db,"historico_entregues"),where("checklist","==",checklist)));
+  if(!snap2.empty)return showToast("Checklist já existe no HISTÓRICO DE ENTREGUES","error");
+
+  const snapDiv=await getDocs(query(collection(db,"divergencias"),where("checklist","==",checklist),where("tratativa","==","PENDENTE")));
+  if(!snapDiv.empty){
+    const ok=confirm("⚠️ Esse checklist possui divergência registrada. Deseja continuar?");
+    if(!ok)return;
+  }
+
+  // busca buffer e calcula tempo de cobertura total
+  const bufferSnap=await getDocs(query(collection(db,"buffer_robos"),where("referenciaPai","==",refpai)));
+  let postoSolda="—", tempoCobertura="—", tempoCoberturaMin=0;
+  if(!bufferSnap.empty){
+    const bd=bufferSnap.docs[0].data();
+    postoSolda=bd.robo||"—";
+    const tempoUnitMin=hmsToMinutes(bd.tempoCobertura||"00:00:00");
+    tempoCoberturaMin=tempoUnitMin*qtdkit;
+    tempoCobertura=minToLeadFmt(tempoCoberturaMin);
+  }
+
+  const ts=new Date();
+  loading(true);
+  try{
+    await addDoc(collection(db,"kits_aguardando"),{
+      dataRegistro:Timestamp.fromDate(ts),
+      checklist,noOp:noop,referenciaPai:refpai,
+      quantKit:qtdkit,volumes,endereco,
+      turnoRecebimento:currentUserData.turno,
+      conferidoPor:currentUserData.nome,
+      conferidoPorUid:currentUser.uid,
+      postoSolda,tempoCobertura,tempoCoberturaMin,
+      dataPrevEntrega:dataprev
+    });
+
+    if(!snapDiv.empty){
+      for(const dv of snapDiv.docs){
+        const entradaMs=dv.data().dataRegistro?.toDate()?.getTime()||ts.getTime();
+        const leadTimeMs=ts.getTime()-entradaMs;
+        await updateDoc(doc(db,"divergencias",dv.id),{
+          tratativa:"SOLUCIONADO",leadTimeMs,
+          leadTimeFormatado:fmtLeadTime(leadTimeMs),
+          dataSolucao:Timestamp.fromDate(ts)
+        });
+      }
+    }
+
+    document.getElementById("form-recebimento").reset();
+    showToast("Kit registrado com sucesso!","success");
+    // NÃO navega — permanece na tela de recebimento
+  }catch(e){showToast("Erro: "+e.message,"error");}
+  loading(false);
+};
+
+// ═══════════════════════════════════════════════
+//  KITS TABLE
+// ═══════════════════════════════════════════════
+let kitsListener=null;
+function loadKitsTable(){
+  if(kitsListener)kitsListener();
+  const tbody=document.getElementById("kits-tbody");
+  tbody.innerHTML=`<tr><td colspan="13" class="loading-row">Carregando...</td></tr>`;
+  kitsListener=onSnapshot(query(collection(db,"kits_aguardando"),orderBy("dataRegistro","desc")),snap=>{
+    const filters=getKitsFilters();
+    let rows=snap.docs.map(d=>({id:d.id,...d.data()}));
+    rows=applyKitsFilters(rows,filters);
+    renderKitsTable(rows);
+  });
+}
+function getKitsFilters(){
+  return{
+    data:document.getElementById("filter-kits-data")?.value||"",
+    checklist:document.getElementById("filter-kits-checklist")?.value?.toUpperCase()||"",
+    refpai:document.getElementById("filter-kits-refpai")?.value?.toUpperCase()||"",
+    posto:document.getElementById("filter-kits-posto")?.value?.toUpperCase()||"",
+    endereco:document.getElementById("filter-kits-endereco")?.value?.toUpperCase()||""
+  };
+}
+function applyKitsFilters(rows,f){
+  return rows.filter(r=>{
+    if(f.data&&fmtDateInput(r.dataRegistro)!==f.data)return false;
+    if(f.checklist&&!r.checklist?.toUpperCase().includes(f.checklist))return false;
+    if(f.refpai&&!r.referenciaPai?.toUpperCase().includes(f.refpai))return false;
+    if(f.posto&&!r.postoSolda?.toUpperCase().includes(f.posto))return false;
+    if(f.endereco&&!r.endereco?.toUpperCase().includes(f.endereco))return false;
+    return true;
+  });
+}
+function renderKitsTable(rows){
+  const tbody=document.getElementById("kits-tbody");
+  if(!rows.length){tbody.innerHTML=`<tr><td colspan="13" class="empty-row">Nenhum kit encontrado</td></tr>`;return;}
+  tbody.innerHTML=rows.map(r=>`
+    <tr>
+      <td>${fmtDate(r.dataRegistro)}</td>
+      <td>${fmtTime(r.dataRegistro)}</td>
+      <td><span class="badge-checklist">${r.checklist||""}</span></td>
+      <td>${r.noOp||""}</td>
+      <td>${r.referenciaPai||""}</td>
+      <td>${r.quantKit||""}</td>
+      <td><span class="badge-turno">${r.turnoRecebimento||""}</span></td>
+      <td>${r.conferidoPor||""}</td>
+      <td>${r.volumes||""}</td>
+      <td>${r.postoSolda||"—"}</td>
+      <td>${r.tempoCobertura||"—"}</td>
+      <td>${
+        (can("editar_tudo")||can("editar_endereco"))
+          ?`<input class="inline-edit" value="${(r.endereco||"").replace(/"/g,"&quot;")}" onblur="saveEndereco('${r.id}',this.value)" style="text-transform:uppercase;" />`
+          :`<span>${r.endereco||""}</span>`
+      }</td>
+      <td class="actions-cell">
+        ${can("excluir")?`<button class="btn-icon danger" onclick="deleteKit('${r.id}')" title="Excluir">🗑</button>`:""}
+      </td>
+    </tr>`).join("");
+}
+window.saveEndereco=async function(id,val){
+  try{await updateDoc(doc(db,"kits_aguardando",id),{endereco:val.toUpperCase()});}
+  catch(e){showToast("Erro ao salvar","error");}
+};
+window.deleteKit=async function(id){
+  if(!can("excluir"))return showToast("Sem permissão","error");
+  if(!confirm("Excluir este kit?"))return;
+  await deleteDoc(doc(db,"kits_aguardando",id));
+  showToast("Kit excluído","success");
+};
+window.applyKitsFilter=function(){loadKitsTable();};
+
+// ═══════════════════════════════════════════════
+//  EXPORT (sem botões de ação nas células)
+// ═══════════════════════════════════════════════
+window.exportTable=async function(tableId,filename){
+  const XLSX=window.XLSX;
+  if(!XLSX)return showToast("Biblioteca XLSX não carregada","error");
+  // build clean data from rows to avoid rendering issues
+  const table=document.getElementById(tableId);
+  if(!table)return;
+  // clone without action cells
+  const clone=table.cloneNode(true);
+  clone.querySelectorAll(".actions-cell").forEach(c=>c.remove());
+  // replace inline-edit inputs with text
+  clone.querySelectorAll("input.inline-edit").forEach(inp=>{
+    const span=document.createElement("span");span.textContent=inp.value;inp.replaceWith(span);
+  });
+  // replace badge spans with text
+  clone.querySelectorAll("span[class^='badge']").forEach(sp=>{
+    const t=document.createTextNode(sp.textContent);sp.replaceWith(t);
+  });
+  const wb=XLSX.utils.table_to_book(clone,{sheet:"Dados"});
+  XLSX.writeFile(wb,filename+".xlsx");
+};
+window.exportCSV=function(tableId,filename){
+  const table=document.getElementById(tableId);if(!table)return;
+  const clone=table.cloneNode(true);
+  clone.querySelectorAll(".actions-cell").forEach(c=>c.remove());
+  clone.querySelectorAll("input.inline-edit").forEach(inp=>{
+    const span=document.createElement("span");span.textContent=inp.value;inp.replaceWith(span);
+  });
+  const rows=Array.from(clone.querySelectorAll("tr"));
+  const csv=rows.map(r=>Array.from(r.querySelectorAll("th,td")).map(c=>`"${c.innerText.replace(/"/g,'""')}"`).join(",")).join("\n");
+  const blob=new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8;"});
+  const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=filename+".csv";a.click();
+};
+
+// ═══════════════════════════════════════════════
+//  MODAL ENTREGAR
+// ═══════════════════════════════════════════════
+window._kitChecklistMap={};
+window.openEntregarModal=async function(){
+  const snap=await getDocs(query(collection(db,"kits_aguardando"),orderBy("dataRegistro","desc")));
+  window._kitChecklistMap={};
+  snap.docs.forEach(d=>{ window._kitChecklistMap[d.data().checklist]=d.id; });
+  const datalist=document.getElementById("entregar-checklist-list");
+  datalist.innerHTML=snap.docs.map(d=>`<option value="${d.data().checklist}">`).join("");
+  document.getElementById("entregar-checklist-input").value="";
+
+  const opSnap=await getDocs(collection(db,"operadores"));
+  const opList=document.getElementById("entregar-para-list");
+  opList.innerHTML=opSnap.docs.map(d=>`<option value="${d.data().nome}">${d.data().nome} — ${d.data().setor}</option>`).join("");
+  document.getElementById("entregar-para-input").value="";
+
+  document.getElementById("entregar-por").value=currentUserData.nome;
+  document.getElementById("entregar-turno").value=currentUserData.turno;
+  document.getElementById("modal-entregar").style.display="flex";
+};
+window.closeEntregarModal=function(){document.getElementById("modal-entregar").style.display="none";};
+window.confirmarEntrega=async function(){
+  const inputVal=document.getElementById("entregar-checklist-input").value.trim().toUpperCase();
+  const entregueParaVal=document.getElementById("entregar-para-input").value.trim();
+  if(!inputVal)return showToast("Selecione um checklist","warning");
+  if(!entregueParaVal)return showToast("Selecione o operador","warning");
+
+  // Lookup via map (only checklist text visible, IDs never exposed)
+  let kitId=window._kitChecklistMap[inputVal]||null,kitData=null;
+  if(!kitId){
+    const qs=await getDocs(query(collection(db,"kits_aguardando"),where("checklist","==",inputVal)));
+    if(!qs.empty){kitId=qs.docs[0].id;}
+  }
+  if(!kitId)return showToast("Checklist não encontrado em Kits Aguardando","error");
+
+  const kitSnap=await getDoc(doc(db,"kits_aguardando",kitId));
+  if(!kitSnap.exists())return showToast("Kit não encontrado","error");
+  kitData=kitSnap.data();
+
+  const ts=new Date();
+  const registroTs=kitData.dataRegistro?.toDate()||ts;
+  const leadTimeMs=ts.getTime()-registroTs.getTime();
+  loading(true);
+  try{
+    await addDoc(collection(db,"historico_entregues"),{
+      ...kitData,dataEntrega:Timestamp.fromDate(ts),
+      entregueFor:currentUserData.nome,turnoEntrega:currentUserData.turno,
+      entreguePara:entregueParaVal,leadTimeMs,leadTimeFormatado:fmtLeadTime(leadTimeMs)
+    });
+    await deleteDoc(doc(db,"kits_aguardando",kitId));
+    closeEntregarModal();
+    showToast("Kit entregue com sucesso!","success");
+    navigate("historico");
+  }catch(e){showToast("Erro: "+e.message,"error");}
+  loading(false);
+};
+
+// ═══════════════════════════════════════════════
+//  HISTÓRICO ENTREGUES
+// ═══════════════════════════════════════════════
+async function loadHistoricoTable(){
+  const snap=await getDocs(query(collection(db,"historico_entregues"),orderBy("dataEntrega","desc")));
+  const filters={
+    data:document.getElementById("filter-hist-data")?.value||"",
+    checklist:document.getElementById("filter-hist-checklist")?.value?.toUpperCase()||""
+  };
+  let rows=snap.docs.map(d=>({id:d.id,...d.data()})).filter(r=>{
+    if(filters.data&&fmtDateInput(r.dataRegistro)!==filters.data)return false;
+    if(filters.checklist&&!r.checklist?.toUpperCase().includes(filters.checklist))return false;
+    return true;
+  });
+  const tbody=document.getElementById("hist-tbody");
+  if(!rows.length){tbody.innerHTML=`<tr><td colspan="19" class="empty-row">Nenhum registro</td></tr>`;return;}
+  tbody.innerHTML=rows.map(r=>`<tr>
+    <td>${fmtDate(r.dataRegistro)}</td><td>${fmtTime(r.dataRegistro)}</td>
+    <td><span class="badge-checklist">${r.checklist||""}</span></td>
+    <td>${r.noOp||""}</td><td>${r.referenciaPai||""}</td><td>${r.quantKit||""}</td>
+    <td><span class="badge-turno">${r.turnoRecebimento||""}</span></td><td>${r.conferidoPor||""}</td>
+    <td>${r.volumes||""}</td><td>${r.postoSolda||"—"}</td><td>${r.tempoCobertura||"—"}</td>
+    <td>${r.endereco||""}</td>
+    <td>${fmtDate(r.dataEntrega)}</td><td>${fmtTime(r.dataEntrega)}</td>
+    <td>${r.entregueFor||""}</td><td><span class="badge-turno">${r.turnoEntrega||""}</span></td>
+    <td>${r.entreguePara||""}</td>
+    <td><span class="badge-lead">${r.leadTimeFormatado||"—"}</span></td>
+    <td class="actions-cell">${can("excluir")?`<button class="btn-icon danger" onclick="deleteHistorico('${r.id}')">🗑</button>`:""}</td>
+  </tr>`).join("");
+}
+window.deleteHistorico=async function(id){
+  if(!can("excluir"))return showToast("Sem permissão","error");
+  if(!confirm("Excluir?"))return;
+  await deleteDoc(doc(db,"historico_entregues",id));
+  showToast("Excluído","success");loadHistoricoTable();
+};
+window.applyHistFilter=function(){loadHistoricoTable();};
+
+// ═══════════════════════════════════════════════
+//  DIVERGÊNCIAS
+// ═══════════════════════════════════════════════
+window.submitDivergencia=async function(){
+  const checklist=document.getElementById("div-checklist").value.trim().toUpperCase();
+  const noop=document.getElementById("div-noop").value.trim().toUpperCase();
+  const refpai=document.getElementById("div-refpai").value.trim().toUpperCase();
+  const qtd=parseInt(document.getElementById("div-qtd").value);
+  const motivo=document.getElementById("div-motivo-input").value.trim().toUpperCase();
+  const dataprev=document.getElementById("div-dataprev").value;
+  const codpeca=document.getElementById("div-codpeca").value.trim().toUpperCase();
+  const qntpecas=document.getElementById("div-qntpecas").value.trim();
+  const respkit=document.getElementById("div-respkit-input").value.trim().toUpperCase();
+  if(!checklist||!noop||!refpai||!qtd||!motivo||!dataprev)
+    return showToast("Preencha todos os campos obrigatórios","warning");
+  const ts=new Date();
+  loading(true);
+  try{
+    await addDoc(collection(db,"divergencias"),{
+      dataRegistro:Timestamp.fromDate(ts),checklist,noOp:noop,
+      referenciaPai:refpai,quantidade:qtd,motivoDivergencia:motivo,
+      dataPrevEntrega:dataprev,codigoPeca:codpeca,quantidadePecas:qntpecas,
+      responsavelKit:respkit,turnoConferente:currentUserData.turno,
+      conferente:currentUserData.nome,conferenteUid:currentUser.uid,
+      tratativa:"PENDENTE",leadTimeMs:null,leadTimeFormatado:"PENDENTE"
+    });
+    document.getElementById("form-divergencia").reset();
+    showToast("Divergência registrada!","success");
+    // permanece na mesma tela
+  }catch(e){showToast("Erro: "+e.message,"error");}
+  loading(false);
+};
+
+async function loadDivergenciasTable(){
+  const snap=await getDocs(query(collection(db,"divergencias"),orderBy("dataRegistro","desc")));
+  const filters={
+    data:document.getElementById("filter-div-data")?.value||"",
+    checklist:document.getElementById("filter-div-checklist")?.value?.toUpperCase()||"",
+    refpai:document.getElementById("filter-div-refpai")?.value?.toUpperCase()||"",
+    motivo:document.getElementById("filter-div-motivo")?.value?.toUpperCase()||"",
+    tratativa:document.getElementById("filter-div-tratativa")?.value||""
+  };
+  let rows=snap.docs.map(d=>({id:d.id,...d.data()})).filter(r=>{
+    if(filters.data&&fmtDateInput(r.dataRegistro)!==filters.data)return false;
+    if(filters.checklist&&!r.checklist?.toUpperCase().includes(filters.checklist))return false;
+    if(filters.refpai&&!r.referenciaPai?.toUpperCase().includes(filters.refpai))return false;
+    if(filters.motivo&&!r.motivoDivergencia?.toUpperCase().includes(filters.motivo))return false;
+    if(filters.tratativa&&r.tratativa!==filters.tratativa)return false;
+    return true;
+  });
+  const tbody=document.getElementById("div-tbody");
+  if(!rows.length){tbody.innerHTML=`<tr><td colspan="16" class="empty-row">Nenhuma divergência</td></tr>`;return;}
+  tbody.innerHTML=rows.map(r=>`<tr class="${r.tratativa==="SOLUCIONADO"?"row-solved":"row-pending"}">
+    <td>${fmtDate(r.dataRegistro)}</td><td>${fmtTime(r.dataRegistro)}</td>
+    <td>${r.dataPrevEntrega||""}</td>
+    <td><span class="badge-checklist">${r.checklist||""}</span></td>
+    <td>${r.noOp||""}</td><td>${r.referenciaPai||""}</td><td>${r.quantidade||""}</td>
+    <td>${r.motivoDivergencia||""}</td><td>${r.codigoPeca||"—"}</td>
+    <td>${r.quantidadePecas||"—"}</td><td>${r.responsavelKit||"—"}</td>
+    <td><span class="badge-turno">${r.turnoConferente||""}</span></td><td>${r.conferente||""}</td>
+    <td><span class="badge-tratativa ${r.tratativa==="SOLUCIONADO"?"solved":"pending"}">${r.tratativa}</span></td>
+    <td><span class="badge-lead">${r.leadTimeFormatado||"PENDENTE"}</span></td>
+    <td class="actions-cell">${can("excluir")?`<button class="btn-icon danger" onclick="deleteDivergencia('${r.id}')">🗑</button>`:""}</td>
+  </tr>`).join("");
+}
+window.deleteDivergencia=async function(id){
+  if(!can("excluir"))return showToast("Sem permissão","error");
+  if(!confirm("Excluir?"))return;
+  await deleteDoc(doc(db,"divergencias",id));
+  showToast("Excluído","success");loadDivergenciasTable();
+};
+window.applyDivFilter=function(){loadDivergenciasTable();};
+
+// ═══════════════════════════════════════════════
+//  CADASTROS
+// ═══════════════════════════════════════════════
+async function loadCadastros(){
+  loadOperadores();loadMotivos();loadRobos();loadBuffer();loadResponsaveis();
+}
+
+// Operadores
+async function loadOperadores(){
+  const snap=await getDocs(collection(db,"operadores"));
+  const tbody=document.getElementById("op-tbody");
+  tbody.innerHTML=snap.empty?`<tr><td colspan="3" class="empty-row">Nenhum operador</td></tr>`:
+    snap.docs.map(d=>`<tr><td>${d.data().nome}</td><td>${d.data().setor}</td>
+    <td class="actions-cell">
+      ${can("excluir")?`<button class="btn-icon danger" onclick="deleteItem('operadores','${d.id}',loadOperadores)">🗑</button>`:""}
+      ${can("editar_tudo")?`<button class="btn-icon" onclick="editOperador('${d.id}','${d.data().nome}','${d.data().setor}')">✏️</button>`:""}
+    </td></tr>`).join("");
+  // populate datalist for entregar
+  const opList=document.getElementById("entregar-para-list");
+  if(opList) opList.innerHTML=snap.docs.map(d=>`<option value="${d.data().nome}">${d.data().nome} — ${d.data().setor}</option>`).join("");
+}
+window.addOperador=async function(){
+  const nome=document.getElementById("op-nome").value.trim().toUpperCase();
+  const setor=document.getElementById("op-setor").value.trim().toUpperCase();
+  if(!nome||!setor)return showToast("Preencha nome e setor","warning");
+  await addDoc(collection(db,"operadores"),{nome,setor});
+  document.getElementById("op-nome").value="";document.getElementById("op-setor").value="";
+  loadOperadores();showToast("Operador cadastrado","success");
+};
+window.editOperador=async function(id,nome,setor){
+  const n=prompt("Nome:",nome);if(n===null)return;
+  const s=prompt("Setor:",setor);if(s===null)return;
+  await updateDoc(doc(db,"operadores",id),{nome:n.toUpperCase(),setor:s.toUpperCase()});
+  loadOperadores();
+};
+
+// Responsáveis
+async function loadResponsaveis(){
+  const snap=await getDocs(collection(db,"responsaveis"));
+  const tbody=document.getElementById("resp-tbody");
+  tbody.innerHTML=snap.empty?`<tr><td colspan="2" class="empty-row">Nenhum responsável</td></tr>`:
+    snap.docs.map(d=>`<tr><td>${d.data().nome}</td>
+    <td class="actions-cell">
+      ${can("excluir")?`<button class="btn-icon danger" onclick="deleteItem('responsaveis','${d.id}',loadResponsaveis)">🗑</button>`:""}
+    </td></tr>`).join("");
+  // populate datalist
+  const list=document.getElementById("div-respkit-list");
+  if(list) list.innerHTML=snap.docs.map(d=>`<option value="${d.data().nome}">`).join("");
+}
+window.addResponsavel=async function(){
+  const nome=document.getElementById("resp-nome").value.trim().toUpperCase();
+  if(!nome)return showToast("Preencha o nome","warning");
+  await addDoc(collection(db,"responsaveis"),{nome});
+  document.getElementById("resp-nome").value="";
+  loadResponsaveis();showToast("Responsável cadastrado","success");
+};
+
+// Motivos
+const DEFAULT_MOTIVOS=["SOBRA DE PEÇA","FALTA DE PEÇA","PEÇA ERRADA","FALTA DE PROCESSO","QUALIDADE","FORA DO PADRÃO/EMBALAGEM","SEM ETIQUETA NOS COMPONENTES","ID DO COMPONENTE DIVERGENTE"];
+async function initMotivos(){
+  const snap=await getDocs(collection(db,"motivos_divergencia"));
+  if(snap.empty){for(const m of DEFAULT_MOTIVOS)await addDoc(collection(db,"motivos_divergencia"),{motivo:m});}
+  loadMotivos();
+}
+async function loadMotivos(){
+  const snap=await getDocs(collection(db,"motivos_divergencia"));
+  const tbody=document.getElementById("motivos-tbody");
+  tbody.innerHTML=snap.empty?`<tr><td colspan="2" class="empty-row">—</td></tr>`:
+    snap.docs.map(d=>`<tr><td>${d.data().motivo}</td>
+    <td class="actions-cell">${can("excluir")?`<button class="btn-icon danger" onclick="deleteItem('motivos_divergencia','${d.id}',loadMotivos)">🗑</button>`:""}</td></tr>`).join("");
+  const list=document.getElementById("div-motivo-list");
+  if(list) list.innerHTML=snap.docs.map(d=>`<option value="${d.data().motivo}">`).join("");
+}
+window.addMotivo=async function(){
+  const m=document.getElementById("motivo-novo").value.trim().toUpperCase();
+  if(!m)return showToast("Digite o motivo","warning");
+  await addDoc(collection(db,"motivos_divergencia"),{motivo:m});
+  document.getElementById("motivo-novo").value="";
+  loadMotivos();showToast("Motivo cadastrado","success");
+};
+
+// Robôs — horas por turno em HH:MM
+async function loadRobos(){
+  const snap=await getDocs(collection(db,"robos"));
+  const tbody=document.getElementById("robos-tbody");
+  tbody.innerHTML=snap.empty?`<tr><td colspan="6" class="empty-row">Nenhum robô</td></tr>`:
+    snap.docs.map(d=>{
+      const r=d.data();
+      const horasMin=hmToMinutes(r.horasPorTurno||"00:00");
+      const totalMin=horasMin*r.turnosTrabalhados*(r.oee/100);
+      const days=Math.floor(totalMin/1440),hrs=Math.floor((totalMin%1440)/60),mins=Math.round(totalMin%60);
+      const secs=0;
+      const fmt=`${days}d | ${String(hrs).padStart(2,"0")}:${String(mins).padStart(2,"0")}:${String(secs).padStart(2,"0")}`;
+      return`<tr><td>${r.idRobo}</td><td>${r.oee}%</td><td>${r.turnosTrabalhados}</td>
+      <td>${r.horasPorTurno}</td><td><span class="badge-lead">${fmt}</span></td>
+      <td class="actions-cell">
+        ${can("excluir")?`<button class="btn-icon danger" onclick="deleteItem('robos','${d.id}',loadRobos)">🗑</button>`:""}
+        ${can("editar_tudo")?`<button class="btn-icon" onclick="editRobo('${d.id}')">✏️</button>`:""}
+      </td></tr>`;
+    }).join("");
+}
+window.addRobo=async function(){
+  const idRobo=document.getElementById("robo-id").value.trim().toUpperCase();
+  const oee=parseFloat(document.getElementById("robo-oee").value);
+  const turnos=parseInt(document.getElementById("robo-turnos").value);
+  const horas=document.getElementById("robo-horas").value.trim();
+  if(!idRobo||isNaN(oee)||isNaN(turnos)||!horas)return showToast("Preencha todos os campos","warning");
+  if(!/^\d{1,2}:\d{2}$/.test(horas))return showToast("Horas por turno no formato HH:MM","warning");
+  await addDoc(collection(db,"robos"),{idRobo,oee,turnosTrabalhados:turnos,horasPorTurno:horas});
+  document.getElementById("robo-id").value="";document.getElementById("robo-oee").value="";
+  document.getElementById("robo-turnos").value="";document.getElementById("robo-horas").value="";
+  loadRobos();showToast("Robô cadastrado","success");
+};
+window.importRobos=async function(event){
+  const file=event.target.files[0];if(!file)return;
+  const modo=confirm("Clique OK para SUBSTITUIR todo o cadastro de robôs com a planilha.\nClique Cancelar para ACRESCENTAR ao cadastro existente.");
+  const reader=new FileReader();
+  reader.onload=async e=>{
+    const XLSX=window.XLSX;if(!XLSX)return showToast("XLSX não carregado","error");
+    const wb=XLSX.read(e.target.result,{type:"array"});
+    const ws=wb.Sheets[wb.SheetNames[0]];
+    const data=XLSX.utils.sheet_to_json(ws,{header:1});
+    loading(true);
+    if(modo){
+      const all=await getDocs(collection(db,"robos"));
+      for(const d of all.docs)await deleteDoc(doc(db,"robos",d.id));
+    }
+    let count=0;
+    for(let i=1;i<data.length;i++){
+      const row=data[i];if(!row[0])continue;
+      const idRobo=String(row[0]).trim().toUpperCase();
+      const oee=parseFloat(row[1])||0;
+      const turnosTrabalhados=parseInt(row[2])||1;
+      // col 3: horas por turno - may be serial or HH:MM string
+      const horasRaw=row[3];
+      let horasPorTurno="08:00";
+      if(typeof horasRaw==="string"&&horasRaw.includes(":")){horasPorTurno=horasRaw.trim();}
+      else if(typeof horasRaw==="number"){
+        const totalMin=Math.round(horasRaw*1440);
+        const h=Math.floor(totalMin/60),m=totalMin%60;
+        horasPorTurno=`${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}`;
+      }
+      if(!idRobo)continue;
+      await addDoc(collection(db,"robos"),{idRobo,oee,turnosTrabalhados,horasPorTurno});
+      count++;
+    }
+    loading(false);
+    loadRobos();showToast(`${count} robôs ${modo?"importados":"acrescentados"}!`,"success");
+  };
+  reader.readAsArrayBuffer(file);event.target.value="";
+};
+window.editRobo=async function(id){
+  const snap=await getDoc(doc(db,"robos",id));if(!snap.exists())return;
+  const r=snap.data();
+  const oee=prompt("OEE (%):",r.oee);if(oee===null)return;
+  const turnos=prompt("Turnos trabalhados:",r.turnosTrabalhados);if(turnos===null)return;
+  const horas=prompt("Horas por turno (HH:MM):",r.horasPorTurno);if(horas===null)return;
+  await updateDoc(doc(db,"robos",id),{oee:parseFloat(oee),turnosTrabalhados:parseInt(turnos),horasPorTurno:horas});
+  loadRobos();
+};
+
+// Buffer — agora "ITEM x ROBO"
+async function loadBuffer(){
+  const snap=await getDocs(collection(db,"buffer_robos"));
+  const tbody=document.getElementById("buffer-tbody");
+  tbody.innerHTML=snap.empty?`<tr><td colspan="4" class="empty-row">Nenhum item</td></tr>`:
+    snap.docs.map(d=>`<tr>
+      <td>${d.data().referenciaPai}</td><td>${d.data().robo}</td><td><span class="badge-lead">${d.data().tempoCobertura}</span></td>
+      <td class="actions-cell">
+        ${can("excluir")?`<button class="btn-icon danger" onclick="deleteItem('buffer_robos','${d.id}',loadBuffer)">🗑</button>`:""}
+        ${can("editar_tudo")?`<button class="btn-icon" onclick="editBuffer('${d.id}')">✏️</button>`:""}
+      </td></tr>`).join("");
+}
+window.addBuffer=async function(){
+  const ref=document.getElementById("buf-ref").value.trim().toUpperCase();
+  const robo=document.getElementById("buf-robo").value.trim().toUpperCase();
+  const tempo=document.getElementById("buf-tempo").value.trim();
+  if(!ref||!robo||!tempo)return showToast("Preencha todos os campos","warning");
+  if(!/^\d{1,2}:\d{2}:\d{2}$/.test(tempo))return showToast("Tempo no formato HH:MM:SS","warning");
+  const existing=await getDocs(query(collection(db,"buffer_robos"),where("referenciaPai","==",ref)));
+  if(!existing.empty){await updateDoc(doc(db,"buffer_robos",existing.docs[0].id),{robo,tempoCobertura:tempo});}
+  else{await addDoc(collection(db,"buffer_robos"),{referenciaPai:ref,robo,tempoCobertura:tempo});}
+  document.getElementById("buf-ref").value="";document.getElementById("buf-robo").value="";document.getElementById("buf-tempo").value="";
+  loadBuffer();showToast("Registro atualizado","success");
+};
+window.editBuffer=async function(id){
+  const snap=await getDoc(doc(db,"buffer_robos",id));if(!snap.exists())return;
+  const b=snap.data();
+  const robo=prompt("Robô:",b.robo);if(robo===null)return;
+  const tempo=prompt("Tempo de cobertura (HH:MM:SS):",b.tempoCobertura);if(tempo===null)return;
+  await updateDoc(doc(db,"buffer_robos",id),{robo:robo.toUpperCase(),tempoCobertura:tempo});
+  loadBuffer();
+};
+// Convert Excel serial number (fraction of day) to HH:MM:SS
+function excelSerialToHMS(val){
+  if(typeof val==="string"&&val.includes(":"))return val.trim();
+  const totalSec=Math.round(parseFloat(val)*86400);
+  const h=Math.floor(totalSec/3600);
+  const m=Math.floor((totalSec%3600)/60);
+  const s=totalSec%60;
+  return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+}
+window.importBuffer=async function(event){
+  const file=event.target.files[0];if(!file)return;
+  const modo=confirm("Clique OK para SUBSTITUIR todo o cadastro com a planilha.\nClique Cancelar para ACRESCENTAR ao cadastro existente.");
+  const reader=new FileReader();
+  reader.onload=async e=>{
+    const XLSX=window.XLSX;if(!XLSX)return showToast("XLSX não carregado","error");
+    const wb=XLSX.read(e.target.result,{type:"array"});
+    const ws=wb.Sheets[wb.SheetNames[0]];
+    const data=XLSX.utils.sheet_to_json(ws,{header:1});
+    loading(true);
+    if(modo){
+      // Delete all existing
+      const all=await getDocs(collection(db,"buffer_robos"));
+      for(const d of all.docs)await deleteDoc(doc(db,"buffer_robos",d.id));
+    }
+    let count=0;
+    for(let i=1;i<data.length;i++){
+      const row=data[i];if(!row[0])continue;
+      const ref=String(row[0]).trim().toUpperCase();
+      const robo=String(row[1]||"").trim().toUpperCase();
+      const tempoRaw=row[2];
+      const tempo=excelSerialToHMS(tempoRaw);
+      if(!ref)continue;
+      if(modo){
+        await addDoc(collection(db,"buffer_robos"),{referenciaPai:ref,robo,tempoCobertura:tempo});
+      } else {
+        const ex=await getDocs(query(collection(db,"buffer_robos"),where("referenciaPai","==",ref)));
+        if(!ex.empty){await updateDoc(doc(db,"buffer_robos",ex.docs[0].id),{robo,tempoCobertura:tempo});}
+        else{await addDoc(collection(db,"buffer_robos"),{referenciaPai:ref,robo,tempoCobertura:tempo});}
+      }
+      count++;
+    }
+    loading(false);
+    loadBuffer();showToast(`${count} registros ${modo?"importados":"acrescentados"}!`,"success");
+  };
+  reader.readAsArrayBuffer(file);event.target.value="";
+};
+
+window.deleteItem=async function(coll,id,reloadFn){
+  if(!can("excluir"))return showToast("Sem permissão","error");
+  if(!confirm("Excluir este item?"))return;
+  await deleteDoc(doc(db,coll,id));reloadFn();showToast("Excluído","success");
+};
+
+// make reload fns global
+window.loadOperadores=loadOperadores;
+window.loadMotivos=loadMotivos;
+window.loadRobos=loadRobos;
+window.loadBuffer=loadBuffer;
+window.loadResponsaveis=loadResponsaveis;
+
+// ═══════════════════════════════════════════════
+//  USUÁRIOS
+// ═══════════════════════════════════════════════
+async function loadUsuarios(){
+  const snap=await getDocs(collection(db,"usuarios"));
+  const tbody=document.getElementById("users-tbody");
+  const permMap={visualizador:"Visualizador",operador:"Operador",adm_basico:"ADM Básico",adm_master:"ADM Master"};
+  tbody.innerHTML=snap.empty?`<tr><td colspan="5" class="empty-row">Nenhum usuário</td></tr>`:
+    snap.docs.map(d=>{const u=d.data();return`<tr>
+      <td>${u.nome}</td><td>${u.email}</td>
+      <td><span class="badge-turno">${u.turno||""}</span></td>
+      <td><span class="badge-perm ${u.permissao}">${permMap[u.permissao]||u.permissao}</span></td>
+      <td class="actions-cell">
+        <select class="perm-select" onchange="changePermissao('${d.id}',this.value)">
+          <option value="visualizador" ${u.permissao==="visualizador"?"selected":""}>Visualizador</option>
+          <option value="operador" ${u.permissao==="operador"?"selected":""}>Operador</option>
+          <option value="adm_basico" ${u.permissao==="adm_basico"?"selected":""}>ADM Básico</option>
+          <option value="adm_master" ${u.permissao==="adm_master"?"selected":""}>ADM Master</option>
+        </select>
+      </td></tr>`;}).join("");
+}
+window.changePermissao=async function(uid,perm){
+  if(!masterActive&&effectivePerm()!=="adm_master")return showToast("Sem permissão","error");
+  await updateDoc(doc(db,"usuarios",uid),{permissao:perm});
+  showToast("Permissão atualizada","success");loadUsuarios();
+};
+
+// ═══════════════════════════════════════════════
+//  INDICADORES
+// ═══════════════════════════════════════════════
+async function loadIndicadores(){
+  loading(true);
+  try{
+    await Promise.all([drawBufferChart(),drawKitEsperaChart(),drawDivergenciasCharts()]);
+  }catch(e){showToast("Erro ao carregar indicadores: "+e.message,"error");}
+  loading(false);
+}
+
+// Gráfico 1: Buffer por robô (kits aguardando)
+async function drawBufferChart(){
+  const kitsSnap=await getDocs(collection(db,"kits_aguardando"));
+  const robosSnap=await getDocs(collection(db,"robos"));
+
+  // total efetivo por robô
+  const roboEfetivo={};
+  robosSnap.docs.forEach(d=>{
+    const r=d.data();
+    const horasMin=hmToMinutes(r.horasPorTurno||"00:00");
+    roboEfetivo[r.idRobo]=horasMin*r.turnosTrabalhados*(r.oee/100);
+  });
+
+  // tempo ocupado por robô (kits aguardando)
+  const roboOcupado={};
+  kitsSnap.docs.forEach(d=>{
+    const k=d.data();
+    const robo=k.postoSolda;if(!robo||robo==="—")return;
+    roboOcupado[robo]=(roboOcupado[robo]||0)+(k.tempoCoberturaMin||0);
+  });
+
+  const robos=Object.keys({...roboEfetivo,...roboOcupado}).sort();
+  const container=document.getElementById("chart-buffer");
+  if(!robos.length){container.innerHTML=`<div class="chart-empty">Nenhum dado disponível</div>`;return;}
+
+  container.innerHTML=`<div class="chart-bar-wrap"><canvas id="cv-buffer"></canvas></div>`;
+  const ctx=document.getElementById("cv-buffer").getContext("2d");
+  new Chart(ctx,{
+    type:"bar",
+    data:{
+      labels:robos,
+      datasets:[
+        {label:"Capacidade Efetiva (min)",data:robos.map(r=>Math.round(roboEfetivo[r]||0)),backgroundColor:"rgba(240,165,0,0.3)",borderColor:"#f0a500",borderWidth:2},
+        {label:"Ocupado — Kits Aguardando (min)",data:robos.map(r=>Math.round(roboOcupado[r]||0)),backgroundColor:"rgba(88,166,255,0.3)",borderColor:"#58a6ff",borderWidth:2}
+      ]
+    },
+    options:{
+      responsive:true,plugins:{
+        legend:{labels:{color:"#8b949e",font:{family:"IBM Plex Mono",size:11}}},
+        tooltip:{callbacks:{label:ctx=>{const v=ctx.raw;return` ${minToVerbose(v)}`;}}}
+      },
+      scales:{
+        x:{ticks:{color:"#8b949e"},grid:{color:"rgba(255,255,255,0.05)"}},
+        y:{ticks:{color:"#8b949e",callback:v=>minToVerbose(v)},grid:{color:"rgba(255,255,255,0.05)"}}
+      }
+    }
+  });
+
+  // tabela resumo
+  let tbl=`<div class="chart-table-wrap" style="max-width:100%;margin-top:16px"><table class="data-table ind-table">
+    <thead><tr><th>Robô</th><th>Cap. Efetiva</th><th>Ocupado (Kits)</th><th>Disponível</th><th>Turnos Equiv.</th></tr></thead><tbody>`;
+  robos.forEach(r=>{
+    const ef=roboEfetivo[r]||0;const oc=roboOcupado[r]||0;const disp=Math.max(0,ef-oc);
+    const rd=robosSnap.docs.find(d=>d.data().idRobo===r)?.data();
+    const horasMin=rd?hmToMinutes(rd.horasPorTurno||"00:00"):480;
+    const turnosEq=(horasMin>0?(disp/horasMin).toFixed(1):"—");
+    tbl+=`<tr>
+      <td>${r}</td>
+      <td><span class="badge-lead">${minToVerbose(ef)}</span></td>
+      <td><span class="badge-lead" style="color:var(--blue)">${minToVerbose(oc)}</span></td>
+      <td><span class="badge-lead" style="color:var(--green)">${minToVerbose(disp)}</span></td>
+      <td>${turnosEq} turnos</td>
+    </tr>`;
+  });
+  tbl+=`</tbody></table></div>`;
+  container.innerHTML+=tbl;
+}
+
+// Gráfico 2: Tempo médio kits aguardando por mês + Top 5 mais antigos
+async function drawKitEsperaChart(){
+  const histSnap=await getDocs(query(collection(db,"historico_entregues"),orderBy("dataEntrega","desc")));
+  const kitsSnap=await getDocs(query(collection(db,"kits_aguardando"),orderBy("dataRegistro","asc")));
+  const now=new Date();
+
+  // médias por mês
+  const byMonth={};
+  histSnap.docs.forEach(d=>{
+    const k=d.data();if(!k.leadTimeMs)return;
+    const dt=k.dataEntrega?.toDate()||new Date();
+    const key=`${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}`;
+    if(!byMonth[key]){byMonth[key]={sum:0,count:0};}
+    byMonth[key].sum+=k.leadTimeMs/60000;byMonth[key].count++;
+  });
+  const months=Object.keys(byMonth).sort().slice(-12);
+  const avgData=months.map(m=>(byMonth[m].sum/byMonth[m].count).toFixed(0));
+
+  const c2=document.getElementById("chart-espera");
+  c2.innerHTML=`<div class="chart-bar-wrap"><canvas id="cv-espera"></canvas></div>`;
+  if(months.length){
+    const ctx2=document.getElementById("cv-espera").getContext("2d");
+    new Chart(ctx2,{type:"line",data:{
+      labels:months,
+      datasets:[{label:"Tempo médio aguardando (min)",data:avgData,borderColor:"#f0a500",backgroundColor:"rgba(240,165,0,0.1)",tension:.4,fill:true,pointBackgroundColor:"#f0a500",pointRadius:4}]
+    },options:{responsive:true,plugins:{
+      legend:{labels:{color:"#8b949e",font:{family:"IBM Plex Mono",size:11}}},
+      tooltip:{callbacks:{label:ctx=>{return` ${minToVerbose(parseFloat(ctx.raw))}`;}}
+      }},
+      scales:{x:{ticks:{color:"#8b949e"},grid:{color:"rgba(255,255,255,0.05)"}},
+        y:{ticks:{color:"#8b949e",callback:v=>minToVerbose(v)},grid:{color:"rgba(255,255,255,0.05)"}}}
+    }});
+  } else {
+    c2.innerHTML=`<div class="chart-empty">Sem histórico suficiente</div>`;
+  }
+
+  // Top 5 mais antigos aguardando
+  const top5=kitsSnap.docs.map(d=>{
+    const k=d.data();
+    const reg=k.dataRegistro?.toDate()||now;
+    return{...k,waitMin:(now.getTime()-reg.getTime())/60000};
+  }).sort((a,b)=>b.waitMin-a.waitMin).slice(0,5);
+
+  let top5html=`<div class="chart-subtitle" style="margin-top:20px">⏳ Top 5 Kits Aguardando Há Mais Tempo</div>
+  <div class="chart-table-wrap" style="max-width:100%;margin-top:8px"><table class="data-table ind-table">
+    <thead><tr><th>Checklist</th><th>Ref. Pai</th><th>Posto Solda</th><th>Aguardando Há</th></tr></thead><tbody>`;
+  if(top5.length){
+    top5.forEach((k,i)=>{
+      top5html+=`<tr><td><span class="badge-checklist">${k.checklist||"—"}</span></td>
+        <td>${k.referenciaPai||"—"}</td><td>${k.postoSolda||"—"}</td>
+        <td><span class="badge-lead" style="color:${i===0?"var(--red)":i<3?"var(--amber)":"var(--text2)"}">${minToVerbose(k.waitMin)}</span></td></tr>`;
+    });
+  } else { top5html+=`<tr><td colspan="4" class="empty-row">Nenhum kit aguardando</td></tr>`; }
+  top5html+=`</tbody></table></div>`;
+  c2.innerHTML+=top5html;
+}
+
+// Gráfico 3: Divergências
+async function drawDivergenciasCharts(){
+  const snap=await getDocs(query(collection(db,"divergencias"),orderBy("dataRegistro","asc")));
+  const rows=snap.docs.map(d=>({id:d.id,...d.data()}));
+
+  const c3=document.getElementById("chart-div");
+  if(!rows.length){c3.innerHTML=`<div class="chart-empty">Nenhuma divergência registrada</div>`;return;}
+  c3.innerHTML="";
+
+  // A) Tipo por mês
+  const tipoMes={};
+  rows.forEach(r=>{
+    const dt=r.dataRegistro?.toDate()||new Date();
+    const key=`${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}`;
+    const motivo=r.motivoDivergencia||"OUTRO";
+    if(!tipoMes[key])tipoMes[key]={};
+    tipoMes[key][motivo]=(tipoMes[key][motivo]||0)+1;
+  });
+  const months=Object.keys(tipoMes).sort().slice(-6);
+  const allMotivos=[...new Set(rows.map(r=>r.motivoDivergencia||"OUTRO"))];
+  const colors=["#f0a500","#58a6ff","#3fb950","#f85149","#bc8cff","#39d353","#ff7b72","#ffa657"];
+  const divA=document.createElement("div");
+  divA.innerHTML=`<div class="chart-subtitle">📊 Tipos de Divergência por Mês</div><div class="chart-bar-wrap"><canvas id="cv-div-tipo"></canvas></div>`;
+  c3.appendChild(divA);
+  const ctx3=document.getElementById("cv-div-tipo").getContext("2d");
+  new Chart(ctx3,{type:"bar",data:{
+    labels:months,
+    datasets:allMotivos.map((m,i)=>({label:m,data:months.map(mo=>tipoMes[mo]?.[m]||0),backgroundColor:colors[i%colors.length]+"55",borderColor:colors[i%colors.length],borderWidth:2,borderRadius:3}))
+  },options:{responsive:true,plugins:{legend:{labels:{color:"#8b949e",font:{size:10}}}},
+    scales:{x:{stacked:true,ticks:{color:"#8b949e"},grid:{color:"rgba(255,255,255,0.05)"}},
+      y:{stacked:true,ticks:{color:"#8b949e"},grid:{color:"rgba(255,255,255,0.05)"}}}
+  }});
+
+  // B) Total diário no mês selecionado
+  const selMes=months[months.length-1]||"";
+  const [anoS,mesS]=selMes.split("-");
+  const diasDoMes=new Date(parseInt(anoS),parseInt(mesS),0).getDate();
+  const diario={};
+  for(let d=1;d<=diasDoMes;d++)diario[`${d}`]=0;
+  rows.forEach(r=>{
+    const dt=r.dataRegistro?.toDate()||new Date();
+    const key=`${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}`;
+    if(key===selMes)diario[String(dt.getDate())]=(diario[String(dt.getDate())]||0)+1;
+  });
+  const divB=document.createElement("div");divB.style.marginTop="24px";
+  divB.innerHTML=`<div class="chart-subtitle">📅 Total Diário — ${selMes}</div><div class="chart-bar-wrap"><canvas id="cv-div-diario"></canvas></div>`;
+  c3.appendChild(divB);
+  const ctx4=document.getElementById("cv-div-diario").getContext("2d");
+  new Chart(ctx4,{type:"bar",data:{
+    labels:Object.keys(diario),
+    datasets:[{label:"Divergências",data:Object.values(diario),backgroundColor:"rgba(248,81,73,0.35)",borderColor:"#f85149",borderWidth:2,borderRadius:3}]
+  },options:{responsive:true,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},
+    scales:{x:{ticks:{color:"#8b949e"},grid:{color:"rgba(255,255,255,0.05)"}},
+      y:{ticks:{color:"#8b949e"},grid:{color:"rgba(255,255,255,0.05)"}}}
+  }});
+
+  // C) Acumulado por mês
+  const mesCount={};
+  rows.forEach(r=>{
+    const dt=r.dataRegistro?.toDate()||new Date();
+    const key=`${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,"0")}`;
+    mesCount[key]=(mesCount[key]||0)+1;
+  });
+  const allMonths=Object.keys(mesCount).sort();
+  const divC=document.createElement("div");divC.style.marginTop="24px";
+  divC.innerHTML=`<div class="chart-subtitle">📈 Total Acumulado por Mês</div><div class="chart-bar-wrap"><canvas id="cv-div-mes"></canvas></div>`;
+  c3.appendChild(divC);
+  const ctx5=document.getElementById("cv-div-mes").getContext("2d");
+  new Chart(ctx5,{type:"line",data:{
+    labels:allMonths,
+    datasets:[{label:"Total divergências",data:allMonths.map(m=>mesCount[m]),borderColor:"#bc8cff",backgroundColor:"rgba(188,140,255,0.1)",tension:.4,fill:true,pointBackgroundColor:"#bc8cff",pointRadius:4}]
+  },options:{responsive:true,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},
+    scales:{x:{ticks:{color:"#8b949e"},grid:{color:"rgba(255,255,255,0.05)"}},
+      y:{ticks:{color:"#8b949e"},grid:{color:"rgba(255,255,255,0.05)"}}}
+  }});
+
+  // D) Ranking tabelas
+  const itemCount={},operCount={};
+  rows.forEach(r=>{
+    const item=r.referenciaPai||"—";const oper=r.conferente||"—";
+    itemCount[item]=(itemCount[item]||0)+1;
+    operCount[oper]=(operCount[oper]||0)+1;
+  });
+  const topItems=Object.entries(itemCount).sort((a,b)=>b[1]-a[1]).slice(0,10);
+  const topOpers=Object.entries(operCount).sort((a,b)=>b[1]-a[1]);
+
+  const divD=document.createElement("div");divD.className="ind-2col";
+  divD.innerHTML=`
+    <div class="chart-table-wrap">
+      <div class="chart-subtitle">🔁 Itens com Mais Divergências</div>
+      <table class="data-table ind-table" style="margin-top:8px">
+        <thead><tr><th>#</th><th>Ref. Pai</th><th>Ocorrências</th></tr></thead>
+        <tbody>${topItems.map((x,i)=>`<tr><td>${i+1}</td><td>${x[0]}</td><td><span class="badge-tratativa pending">${x[1]}</span></td></tr>`).join("")||`<tr><td colspan="3" class="empty-row">—</td></tr>`}</tbody>
+      </table>
+    </div>
+    <div class="chart-table-wrap">
+      <div class="chart-subtitle">👤 Divergências por Conferente</div>
+      <table class="data-table ind-table" style="margin-top:8px">
+        <thead><tr><th>#</th><th>Conferente</th><th>Total</th></tr></thead>
+        <tbody>${topOpers.map((x,i)=>`<tr><td>${i+1}</td><td>${x[0]}</td><td><span class="badge-tratativa ${i===0?"pending":"solved"}">${x[1]}</span></td></tr>`).join("")||`<tr><td colspan="3" class="empty-row">—</td></tr>`}</tbody>
+      </table>
+    </div>`;
+  c3.appendChild(divD);
+}
+
+// ═══════════════════════════════════════════════
+//  INIT
+// ═══════════════════════════════════════════════
+document.addEventListener("DOMContentLoaded",()=>{
+  initMotivos();
+  document.querySelectorAll(".toggle-pass").forEach(btn=>{
+    btn.addEventListener("click",()=>{
+      const inp=btn.previousElementSibling;
+      inp.type=inp.type==="password"?"text":"password";
+      btn.textContent=inp.type==="password"?"👁":"🙈";
+    });
+  });
+  document.getElementById("login-pass").addEventListener("keydown",e=>{if(e.key==="Enter")doLogin();});
+  document.querySelectorAll(".modal-overlay").forEach(m=>{
+    m.addEventListener("click",e=>{if(e.target===m)m.style.display="none";});
+  });
+});
+</script>
+
+<!-- Chart.js + SheetJS -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Josefin+Sans:wght@300;400;600;700&display=swap');
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+:root{
+  --bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--bg4:#2d333b;
+  --border:#30363d;--border2:#444c56;
+  --text:#e6edf3;--text2:#8b949e;--text3:#6e7681;
+  --amber:#f0a500;--amber2:#e08c00;--amber-glow:rgba(240,165,0,0.15);
+  --green:#3fb950;--red:#f85149;--blue:#58a6ff;--purple:#bc8cff;
+  --radius:6px;--radius2:10px;
+}
+html,body{height:100%;font-family:'Josefin Sans',sans-serif;background:var(--bg);color:var(--text);font-size:14px;}
+::-webkit-scrollbar{width:6px;height:6px;}
+::-webkit-scrollbar-track{background:var(--bg);}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px;}
+
+/* AUTH */
+#auth-section{min-height:100vh;display:flex;align-items:center;justify-content:center;
+  background:var(--bg);background-image:
+    repeating-linear-gradient(0deg,transparent,transparent 39px,var(--border) 39px,var(--border) 40px),
+    repeating-linear-gradient(90deg,transparent,transparent 39px,var(--border) 39px,var(--border) 40px);}
+.auth-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius2);
+  width:420px;padding:40px;box-shadow:0 0 60px rgba(0,0,0,0.6),0 0 0 1px var(--border2);}
+.auth-logo{font-family:'Rajdhani',sans-serif;font-weight:700;font-size:28px;color:var(--amber);
+  letter-spacing:4px;text-transform:uppercase;margin-bottom:4px;}
+.auth-subtitle{color:var(--text3);font-size:12px;letter-spacing:2px;text-transform:uppercase;margin-bottom:32px;}
+.auth-panel{display:none;}
+.field-group{margin-bottom:16px;}
+.field-group label{display:block;font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text2);margin-bottom:6px;}
+.field-row{position:relative;display:flex;}
+.field-row input{flex:1;}
+
+input[type="text"],input[type="email"],input[type="password"],input[type="number"],input[type="date"],select,textarea{
+  width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius);
+  color:var(--text);padding:10px 12px;font-family:inherit;font-size:14px;transition:border-color .2s;outline:none;}
+input:focus,select:focus,textarea:focus{border-color:var(--amber);box-shadow:0 0 0 3px var(--amber-glow);}
+select{cursor:pointer;}
+input[list]{background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M0 0l6 8 6-8z' fill='%238b949e'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 12px center;padding-right:32px;}
+
+.toggle-pass{background:var(--bg4);border:1px solid var(--border);border-left:none;
+  border-radius:0 var(--radius) var(--radius) 0;padding:0 10px;cursor:pointer;color:var(--text2);font-size:16px;transition:background .2s;}
+.toggle-pass:hover{background:var(--border);}
+
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  padding:10px 20px;border-radius:var(--radius);border:none;cursor:pointer;
+  font-family:'Rajdhani',sans-serif;font-weight:700;font-size:14px;letter-spacing:1px;
+  text-transform:uppercase;transition:all .2s;}
+.btn-primary{background:var(--amber);color:#000;}
+.btn-primary:hover{background:var(--amber2);transform:translateY(-1px);box-shadow:0 4px 16px var(--amber-glow);}
+.btn-ghost{background:transparent;color:var(--text2);border:1px solid var(--border);}
+.btn-ghost:hover{border-color:var(--amber);color:var(--amber);}
+.btn-danger{background:var(--red);color:#fff;}
+.btn-danger:hover{opacity:.85;}
+.btn-revert{background:rgba(248,81,73,0.2);color:var(--red);border:1px solid rgba(248,81,73,0.4);}
+.btn-revert:hover{background:rgba(248,81,73,0.35);}
+.btn-sm{padding:6px 14px;font-size:12px;}
+.btn-full{width:100%;}
+
+.auth-links{margin-top:16px;display:flex;flex-direction:column;gap:8px;align-items:center;}
+.auth-link{background:none;border:none;color:var(--amber);font-size:13px;cursor:pointer;text-decoration:underline;}
+
+/* APP LAYOUT */
+#app-section{display:none;flex-direction:column;height:100vh;}
+.topbar{background:var(--bg2);border-bottom:1px solid var(--border);
+  padding:0 20px;height:52px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0;}
+.topbar-brand{font-family:'Rajdhani',sans-serif;font-weight:700;font-size:20px;color:var(--amber);letter-spacing:3px;}
+.topbar-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+.user-info{display:flex;flex-direction:column;align-items:flex-end;}
+.user-name{font-size:13px;font-weight:600;color:var(--text);}
+.user-turno{font-size:11px;color:var(--amber);font-family:'IBM Plex Mono',monospace;}
+
+.nav-bar{background:var(--bg2);border-bottom:1px solid var(--border);
+  display:flex;padding:0 16px;gap:2px;flex-shrink:0;overflow-x:auto;}
+.nav-btn{display:flex;align-items:center;gap:5px;padding:0 14px;height:42px;
+  background:none;border:none;cursor:pointer;font-family:'Rajdhani',sans-serif;
+  font-weight:600;font-size:12px;letter-spacing:.5px;text-transform:uppercase;
+  color:var(--text2);border-bottom:2px solid transparent;transition:all .2s;white-space:nowrap;}
+.nav-btn:hover{color:var(--text);}
+.nav-btn.active{color:var(--amber);border-bottom-color:var(--amber);}
+.nav-icon{font-size:14px;}
+.app-body{flex:1;overflow-y:auto;padding:20px;}
+.screen{display:none;}
+.screen.active{display:block;}
+
+/* PAGE */
+.page-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;flex-wrap:wrap;gap:10px;}
+.page-title{font-family:'Rajdhani',sans-serif;font-weight:700;font-size:22px;color:var(--text);letter-spacing:1px;}
+.page-actions{display:flex;gap:8px;flex-wrap:wrap;}
+
+/* FORM CARD */
+.form-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius2);padding:22px;margin-bottom:20px;}
+.form-card-title{font-family:'Rajdhani',sans-serif;font-weight:700;font-size:15px;letter-spacing:1px;
+  color:var(--amber);text-transform:uppercase;margin-bottom:18px;border-bottom:1px solid var(--border);padding-bottom:10px;}
+.form-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px;}
+.field-label{display:block;font-size:11px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:var(--text2);margin-bottom:5px;}
+.field-label .required{color:var(--amber);}
+
+/* TABLE */
+.table-container{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius2);overflow:hidden;}
+.table-toolbar{padding:12px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
+.table-toolbar input,.table-toolbar select{width:auto;min-width:130px;padding:5px 10px;font-size:12px;}
+.table-scroll{overflow-x:auto;}
+.data-table{width:100%;border-collapse:collapse;min-width:600px;}
+.data-table th{background:var(--bg3);padding:9px 11px;text-align:left;
+  font-family:'Rajdhani',sans-serif;font-size:11px;font-weight:700;letter-spacing:1px;
+  text-transform:uppercase;color:var(--text2);border-bottom:1px solid var(--border);white-space:nowrap;}
+.data-table td{padding:8px 11px;border-bottom:1px solid var(--border);color:var(--text);font-size:13px;white-space:nowrap;}
+.data-table tr:last-child td{border-bottom:none;}
+.data-table tr:hover td{background:var(--bg3);}
+.data-table tr.row-solved td{background:rgba(63,185,80,0.04);}
+.data-table tr.row-pending td{background:rgba(248,81,73,0.04);}
+.empty-row,.loading-row{text-align:center;color:var(--text3);padding:28px;font-style:italic;}
+.actions-cell{width:70px;}
+
+/* BADGES */
+.badge-checklist{background:var(--amber-glow);color:var(--amber);padding:2px 8px;border-radius:4px;
+  font-family:'IBM Plex Mono',monospace;font-size:12px;border:1px solid rgba(240,165,0,0.3);}
+.badge-turno{background:rgba(88,166,255,0.1);color:var(--blue);padding:2px 7px;border-radius:4px;
+  font-size:11px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;}
+.badge-lead{background:var(--bg3);color:var(--text2);padding:2px 7px;border-radius:4px;
+  font-family:'IBM Plex Mono',monospace;font-size:11px;border:1px solid var(--border);}
+.badge-tratativa.solved{background:rgba(63,185,80,0.15);color:var(--green);padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;}
+.badge-tratativa.pending{background:rgba(248,81,73,0.15);color:var(--red);padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;}
+.badge-perm.adm_master{background:rgba(240,165,0,0.2);color:var(--amber);padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;}
+.badge-perm.adm_basico{background:rgba(188,140,255,0.15);color:var(--purple);padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;}
+.badge-perm.operador{background:rgba(88,166,255,0.15);color:var(--blue);padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;}
+.badge-perm.visualizador{background:var(--bg3);color:var(--text2);padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;}
+
+.inline-edit{background:transparent;border:1px dashed var(--border2);border-radius:4px;
+  color:var(--text);padding:3px 6px;font-size:13px;min-width:90px;}
+.inline-edit:focus{border-color:var(--amber);background:var(--bg3);}
+.btn-icon{background:none;border:none;cursor:pointer;font-size:14px;padding:4px;border-radius:4px;transition:background .2s;}
+.btn-icon:hover{background:var(--bg4);}
+.btn-icon.danger:hover{background:rgba(248,81,73,0.15);}
+.perm-select{width:auto;min-width:130px;padding:4px 8px;font-size:12px;}
+
+/* MODAL */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);
+  z-index:1000;align-items:center;justify-content:center;}
+.modal-box{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius2);
+  width:480px;max-width:95vw;padding:30px;box-shadow:0 20px 60px rgba(0,0,0,0.5);}
+.modal-title{font-family:'Rajdhani',sans-serif;font-weight:700;font-size:18px;color:var(--amber);
+  letter-spacing:1px;text-transform:uppercase;margin-bottom:22px;}
+.modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:22px;}
+
+/* CADASTROS TABS */
+.cad-tabs{display:flex;gap:2px;margin-bottom:18px;border-bottom:1px solid var(--border);}
+.cad-tab{padding:8px 14px;background:none;border:none;cursor:pointer;font-family:'Rajdhani',sans-serif;
+  font-weight:600;font-size:12px;letter-spacing:.5px;text-transform:uppercase;
+  color:var(--text2);border-bottom:2px solid transparent;transition:all .2s;}
+.cad-tab:hover{color:var(--text);}
+.cad-tab.active{color:var(--amber);border-bottom-color:var(--amber);}
+.cad-panel{display:none;}
+.cad-panel.active{display:block;}
+
+/* INDICADORES */
+.ind-section{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius2);padding:22px;margin-bottom:24px;}
+.ind-section-title{font-family:'Rajdhani',sans-serif;font-weight:700;font-size:16px;color:var(--amber);
+  letter-spacing:1px;text-transform:uppercase;margin-bottom:18px;border-bottom:1px solid var(--border);padding-bottom:10px;}
+.chart-subtitle{font-family:'Rajdhani',sans-serif;font-weight:600;font-size:14px;color:var(--text2);letter-spacing:.5px;text-transform:uppercase;}
+.chart-empty{text-align:center;color:var(--text3);padding:40px;font-style:italic;}
+.ind-table{min-width:unset;}
+
+/* TOAST */
+#toast-container{position:fixed;bottom:24px;right:24px;z-index:9999;display:flex;flex-direction:column;gap:8px;}
+.toast{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);
+  padding:12px 18px;min-width:240px;font-size:13px;opacity:0;transform:translateX(20px);
+  transition:all .3s;box-shadow:0 4px 20px rgba(0,0,0,0.4);}
+.toast.show{opacity:1;transform:translateX(0);}
+.toast-success{border-left:3px solid var(--green);}
+.toast-error{border-left:3px solid var(--red);}
+.toast-warning{border-left:3px solid var(--amber);}
+.toast-info{border-left:3px solid var(--blue);}
+
+#global-loading{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:9998;align-items:center;justify-content:center;}
+.spinner{width:38px;height:38px;border:3px solid var(--border);border-top-color:var(--amber);border-radius:50%;animation:spin .8s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
+.info-box{background:var(--amber-glow);border:1px solid rgba(240,165,0,0.3);border-radius:var(--radius);padding:11px 14px;font-size:13px;color:var(--amber);margin-bottom:14px;}
+.text-muted{color:var(--text3);font-size:12px;}
+
+/* ── CHARTS: limit height for good fit ── */
+.chart-bar-wrap{max-height:50vh;overflow:hidden;position:relative;}
+.chart-bar-wrap canvas{max-height:50vh !important;}
+.chart-table-wrap{max-height:80vh;overflow-y:auto;max-width:45%;min-width:300px;}
+.ind-2col{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-top:16px;}
+.ind-2col .chart-table-wrap{max-width:100%;}
+
+/* ── FOOTER ── */
+.app-footer{position:fixed;bottom:6px;right:14px;font-size:10px;color:var(--text3);
+  pointer-events:none;letter-spacing:.5px;font-family:'IBM Plex Mono',monospace;z-index:100;}
+
+@media(max-width:640px){.form-grid{grid-template-columns:1fr;}.auth-card{width:95vw;padding:24px;}.ind-2col{grid-template-columns:1fr;}.chart-table-wrap{max-width:100%;}}
+</style>
+</head>
+<body>
+
+<div id="global-loading"><div class="spinner"></div></div>
+<div id="toast-container"></div>
+
+<!-- ══════════════ AUTH ══════════════ -->
+<div id="auth-section">
+  <div class="auth-card">
+    <div class="auth-logo">KitControl</div>
+    <div class="auth-subtitle">Magius — Gestão de Kits</div>
+
+    <div class="auth-panel" id="auth-login">
+      <div class="field-group"><label>E-mail</label><input type="email" id="login-email" placeholder="seu@email.com" /></div>
+      <div class="field-group"><label>Senha</label>
+        <div class="field-row"><input type="password" id="login-pass" placeholder="••••••••" /><button class="toggle-pass" type="button">👁</button></div>
+      </div>
+      <button class="btn btn-primary btn-full" onclick="doLogin()">Entrar</button>
+      <div class="auth-links">
+        <button class="auth-link" onclick="showAuthPanel('forgot')">Esqueci minha senha</button>
+        <button class="auth-link" onclick="showAuthPanel('register')">Cadastrar novo usuário</button>
+      </div>
+    </div>
+
+    <div class="auth-panel" id="auth-register">
+      <div class="field-group"><label>Nome completo</label><input type="text" id="reg-nome" placeholder="Nome" oninput="toUpper(this)" /></div>
+      <div class="field-group"><label>E-mail</label><input type="email" id="reg-email" /></div>
+      <div class="field-group"><label>Senha</label>
+        <div class="field-row"><input type="password" id="reg-pass" placeholder="Mínimo 6 caracteres" /><button class="toggle-pass" type="button">👁</button></div>
+      </div>
+      <div class="field-group"><label>Repetir senha</label>
+        <div class="field-row"><input type="password" id="reg-pass2" /><button class="toggle-pass" type="button">👁</button></div>
+      </div>
+      <div class="field-group"><label>Turno</label>
+        <select id="reg-turno">
+          <option value="">Selecione...</option>
+          <option>1º Turno</option><option>2º Turno</option><option>3º Turno</option><option>Adm</option>
+        </select>
+      </div>
+      <button class="btn btn-primary btn-full" onclick="doRegister()">Cadastrar</button>
+      <div class="auth-links"><button class="auth-link" onclick="showAuthPanel('login')">← Voltar</button></div>
+    </div>
+
+    <div class="auth-panel" id="auth-forgot">
+      <div class="info-box">Informe seu e-mail para receber o link de redefinição de senha.</div>
+      <div class="field-group"><label>E-mail</label><input type="email" id="forgot-email" /></div>
+      <button class="btn btn-primary btn-full" onclick="doForgotPassword()">Enviar link</button>
+      <div class="auth-links"><button class="auth-link" onclick="showAuthPanel('login')">← Voltar</button></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ APP ══════════════ -->
+<div id="app-section">
+  <div class="topbar">
+    <div class="topbar-brand">⬡ KitControl</div>
+    <div class="topbar-right">
+      <div class="user-info">
+        <span class="user-name" id="user-name-display">—</span>
+        <span class="user-turno" id="user-turno-display">—</span>
+      </div>
+      <button id="btn-master" class="btn btn-ghost btn-sm" onclick="openMasterModal()">🔑 Master</button>
+      <button id="btn-revert-master" class="btn btn-revert btn-sm" onclick="revertMaster()" style="display:none;">⚠ Sair do Master</button>
+      <button class="btn btn-ghost btn-sm" onclick="doLogout()">Sair</button>
+    </div>
+  </div>
+
+  <div class="nav-bar">
+    <button class="nav-btn" data-nav="recebimento" onclick="navigate('recebimento')"><span class="nav-icon">📥</span>Recebimento</button>
+    <button class="nav-btn" data-nav="kits" onclick="navigate('kits')"><span class="nav-icon">📦</span>Kits Aguardando</button>
+    <button class="nav-btn" data-nav="historico" onclick="navigate('historico')"><span class="nav-icon">✅</span>Hist. Entregues</button>
+    <button class="nav-btn" data-nav="divergencia" onclick="navigate('divergencia')"><span class="nav-icon">⚠️</span>Reg. Divergência</button>
+    <button class="nav-btn" data-nav="divergencias" onclick="navigate('divergencias')"><span class="nav-icon">📋</span>Hist. Divergências</button>
+    <button class="nav-btn" data-nav="cadastros" onclick="navigate('cadastros')"><span class="nav-icon">⚙️</span>Cadastros</button>
+    <button class="nav-btn" data-nav="indicadores" id="nav-indicadores" onclick="navigate('indicadores')" style="display:none;"><span class="nav-icon">📊</span>Indicadores</button>
+    <button class="nav-btn" data-nav="usuarios" id="nav-usuarios" onclick="navigate('usuarios')" style="display:none;"><span class="nav-icon">👥</span>Usuários</button>
+  </div>
+
+  <div class="app-body">
+
+    <!-- RECEBIMENTO -->
+    <div class="screen" id="screen-recebimento">
+      <div class="page-header"><div class="page-title">📥 Recebimento de Kit</div></div>
+      <div class="form-card">
+        <div class="form-card-title">Registrar Recebimento</div>
+        <form id="form-recebimento" onsubmit="event.preventDefault();submitRecebimento()">
+          <div class="form-grid">
+            <div><label class="field-label">Data Prev/Entrega <span class="required">*</span></label><input type="date" id="rec-dataprev" required /></div>
+            <div><label class="field-label">Checklist <span class="required">*</span></label><input type="text" id="rec-checklist" placeholder="Nº do checklist" required oninput="toUpper(this)" /></div>
+            <div><label class="field-label">Nº OP <span class="required">*</span></label><input type="text" id="rec-noop" placeholder="Número OP" required oninput="toUpper(this)" /></div>
+            <div><label class="field-label">Referência Pai <span class="required">*</span></label><input type="text" id="rec-refpai" placeholder="Ref. Pai" required oninput="toUpper(this)" /></div>
+            <div><label class="field-label">Quantidade Kit <span class="required">*</span></label><input type="number" id="rec-qtdkit" placeholder="Qtd" min="1" required /></div>
+            <div><label class="field-label">Volumes <span class="required">*</span></label><input type="number" id="rec-volumes" placeholder="Volumes" min="1" required /></div>
+            <div><label class="field-label">Endereço <span class="required">*</span></label><input type="text" id="rec-endereco" placeholder="Endereço" required oninput="toUpper(this)" /></div>
+          </div>
+          <div style="margin-top:18px;"><button type="submit" class="btn btn-primary">Registrar Recebimento</button></div>
+        </form>
+      </div>
+    </div>
+
+    <!-- KITS AGUARDANDO -->
+    <div class="screen" id="screen-kits">
+      <div class="page-header">
+        <div class="page-title">📦 Kits Aguardando Entrega</div>
+        <div class="page-actions">
+          <button class="btn btn-primary btn-sm" onclick="openEntregarModal()">🚀 Entregar para Produção</button>
+          <button class="btn btn-ghost btn-sm" onclick="exportTable('table-kits','kits_aguardando')">⬇ Excel</button>
+          <button class="btn btn-ghost btn-sm" onclick="exportCSV('table-kits','kits_aguardando')">⬇ CSV</button>
+        </div>
+      </div>
+      <div class="table-container">
+        <div class="table-toolbar">
+          <input type="date" id="filter-kits-data" onchange="applyKitsFilter()" />
+          <input type="text" id="filter-kits-checklist" placeholder="🔍 Checklist" oninput="applyKitsFilter()" style="text-transform:uppercase;" />
+          <input type="text" id="filter-kits-refpai" placeholder="🔍 Ref. Pai" oninput="applyKitsFilter()" style="text-transform:uppercase;" />
+          <input type="text" id="filter-kits-posto" placeholder="🔍 Posto Solda" oninput="applyKitsFilter()" style="text-transform:uppercase;" />
+          <input type="text" id="filter-kits-endereco" placeholder="🔍 Endereço" oninput="applyKitsFilter()" style="text-transform:uppercase;" />
+        </div>
+        <div class="table-scroll">
+          <table class="data-table" id="table-kits">
+            <thead><tr>
+              <th>Data Reg.</th><th>Hora</th><th>Checklist</th><th>Nº OP</th>
+              <th>Ref. Pai</th><th>Qtd Kit</th><th>Turno Receb.</th><th>Conferido Por</th>
+              <th>Volumes</th><th>Posto Solda</th><th>T. Cobertura Total</th><th>Endereço</th><th></th>
+            </tr></thead>
+            <tbody id="kits-tbody"><tr><td colspan="13" class="loading-row">Carregando...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- HISTÓRICO ENTREGUES -->
+    <div class="screen" id="screen-historico">
+      <div class="page-header">
+        <div class="page-title">✅ Histórico de Checklist Entregues</div>
+        <div class="page-actions">
+          <button class="btn btn-ghost btn-sm" onclick="exportTable('table-hist','historico_entregues')">⬇ Excel</button>
+          <button class="btn btn-ghost btn-sm" onclick="exportCSV('table-hist','historico_entregues')">⬇ CSV</button>
+        </div>
+      </div>
+      <div class="table-container">
+        <div class="table-toolbar">
+          <input type="date" id="filter-hist-data" onchange="applyHistFilter()" />
+          <input type="text" id="filter-hist-checklist" placeholder="🔍 Checklist" oninput="applyHistFilter()" style="text-transform:uppercase;" />
+        </div>
+        <div class="table-scroll">
+          <table class="data-table" id="table-hist">
+            <thead><tr>
+              <th>Data Reg.</th><th>Hora</th><th>Checklist</th><th>Nº OP</th>
+              <th>Ref. Pai</th><th>Qtd Kit</th><th>Turno Receb.</th><th>Conferido Por</th>
+              <th>Volumes</th><th>Posto Solda</th><th>T. Cobertura</th><th>Endereço</th>
+              <th>Data Entrega</th><th>Hora Entrega</th><th>Entregue Por</th><th>Turno Entrega</th>
+              <th>Entregue Para</th><th>Lead Time</th><th></th>
+            </tr></thead>
+            <tbody id="hist-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- REGISTRAR DIVERGÊNCIA -->
+    <div class="screen" id="screen-divergencia">
+      <div class="page-header"><div class="page-title">⚠️ Registrar Divergência</div></div>
+      <div class="form-card">
+        <div class="form-card-title">Novo Registro de Divergência</div>
+        <form id="form-divergencia" onsubmit="event.preventDefault();submitDivergencia()">
+          <div class="form-grid">
+            <div><label class="field-label">Data Prev/Entrega <span class="required">*</span></label><input type="date" id="div-dataprev" required /></div>
+            <div><label class="field-label">Checklist <span class="required">*</span></label><input type="text" id="div-checklist" placeholder="Nº do checklist" required oninput="toUpper(this)" /></div>
+            <div><label class="field-label">Nº OP <span class="required">*</span></label><input type="text" id="div-noop" placeholder="Número OP" required oninput="toUpper(this)" /></div>
+            <div><label class="field-label">Referência Pai <span class="required">*</span></label><input type="text" id="div-refpai" placeholder="Ref. Pai" required oninput="toUpper(this)" /></div>
+            <div><label class="field-label">Quantidade Kit <span class="required">*</span></label><input type="number" id="div-qtd" placeholder="Qtd" min="1" required /></div>
+            <div>
+              <label class="field-label">Motivo Divergência <span class="required">*</span></label>
+              <input type="text" list="div-motivo-list" id="div-motivo-input" placeholder="Selecione ou digite..." required oninput="toUpper(this)" />
+              <datalist id="div-motivo-list"></datalist>
+            </div>
+            <div><label class="field-label">Código da Peça</label><input type="text" id="div-codpeca" placeholder="Código" oninput="toUpper(this)" /></div>
+            <div><label class="field-label">Qtd de Peças</label><input type="number" id="div-qntpecas" placeholder="Qtd" /></div>
+            <div>
+              <label class="field-label">Responsável do Kit</label>
+              <input type="text" list="div-respkit-list" id="div-respkit-input" placeholder="Selecione ou digite..." oninput="toUpper(this)" />
+              <datalist id="div-respkit-list"></datalist>
+            </div>
+          </div>
+          <div style="margin-top:18px;"><button type="submit" class="btn btn-danger">Registrar Divergência</button></div>
+        </form>
+      </div>
+    </div>
+
+    <!-- HISTÓRICO DIVERGÊNCIAS -->
+    <div class="screen" id="screen-divergencias">
+      <div class="page-header">
+        <div class="page-title">📋 Histórico de Divergências</div>
+        <div class="page-actions">
+          <button class="btn btn-ghost btn-sm" onclick="exportTable('table-div','divergencias')">⬇ Excel</button>
+          <button class="btn btn-ghost btn-sm" onclick="exportCSV('table-div','divergencias')">⬇ CSV</button>
+        </div>
+      </div>
+      <div class="table-container">
+        <div class="table-toolbar">
+          <input type="date" id="filter-div-data" onchange="applyDivFilter()" />
+          <input type="text" id="filter-div-checklist" placeholder="🔍 Checklist" oninput="applyDivFilter()" style="text-transform:uppercase;" />
+          <input type="text" id="filter-div-refpai" placeholder="🔍 Ref. Pai" oninput="applyDivFilter()" style="text-transform:uppercase;" />
+          <input type="text" id="filter-div-motivo" placeholder="🔍 Motivo" oninput="applyDivFilter()" style="text-transform:uppercase;" />
+          <select id="filter-div-tratativa" onchange="applyDivFilter()">
+            <option value="">Todas tratativas</option>
+            <option value="PENDENTE">Pendente</option>
+            <option value="SOLUCIONADO">Solucionado</option>
+          </select>
+        </div>
+        <div class="table-scroll">
+          <table class="data-table" id="table-div">
+            <thead><tr>
+              <th>Data Reg.</th><th>Hora</th><th>Dt Prev Entrega</th><th>Checklist</th>
+              <th>Nº OP</th><th>Ref. Pai</th><th>Qtd</th><th>Motivo Divergência</th>
+              <th>Cód Peça</th><th>Qtd Peças</th><th>Responsável Kit</th>
+              <th>Turno</th><th>Conferente</th><th>Tratativa</th><th>Lead Time</th><th></th>
+            </tr></thead>
+            <tbody id="div-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- CADASTROS -->
+    <div class="screen" id="screen-cadastros">
+      <div class="page-header"><div class="page-title">⚙️ Cadastros</div></div>
+      <div class="cad-tabs">
+        <button class="cad-tab active" onclick="switchCadTab('operadores',this)">Operadores</button>
+        <button class="cad-tab" onclick="switchCadTab('responsaveis',this)">Responsáveis Kit</button>
+        <button class="cad-tab" onclick="switchCadTab('motivos',this)">Motivos Divergência</button>
+        <button class="cad-tab" onclick="switchCadTab('robos',this)">Robôs</button>
+        <button class="cad-tab" onclick="switchCadTab('buffer',this)">Item × Robô</button>
+      </div>
+
+      <!-- Operadores -->
+      <div class="cad-panel active" id="cad-operadores">
+        <div class="form-card">
+          <div class="form-card-title">Novo Operador</div>
+          <div class="form-grid">
+            <div><label class="field-label">Nome</label><input type="text" id="op-nome" placeholder="Nome" oninput="toUpper(this)" /></div>
+            <div><label class="field-label">Setor</label><input type="text" id="op-setor" placeholder="Setor" oninput="toUpper(this)" /></div>
+          </div>
+          <div style="margin-top:14px;"><button class="btn btn-primary btn-sm" onclick="addOperador()">+ Adicionar</button></div>
+        </div>
+        <div class="table-container"><div class="table-scroll">
+          <table class="data-table"><thead><tr><th>Nome</th><th>Setor</th><th></th></tr></thead>
+          <tbody id="op-tbody"></tbody></table>
+        </div></div>
+      </div>
+
+      <!-- Responsáveis -->
+      <div class="cad-panel" id="cad-responsaveis">
+        <div class="form-card">
+          <div class="form-card-title">Responsável do Kit</div>
+          <div class="form-grid">
+            <div><label class="field-label">Nome</label><input type="text" id="resp-nome" placeholder="Nome" oninput="toUpper(this)" /></div>
+          </div>
+          <div style="margin-top:14px;"><button class="btn btn-primary btn-sm" onclick="addResponsavel()">+ Adicionar</button></div>
+        </div>
+        <div class="table-container"><div class="table-scroll">
+          <table class="data-table"><thead><tr><th>Nome</th><th></th></tr></thead>
+          <tbody id="resp-tbody"></tbody></table>
+        </div></div>
+      </div>
+
+      <!-- Motivos -->
+      <div class="cad-panel" id="cad-motivos">
+        <div class="form-card">
+          <div class="form-card-title">Novo Motivo</div>
+          <div class="form-grid">
+            <div><label class="field-label">Motivo</label><input type="text" id="motivo-novo" placeholder="Descrição" oninput="toUpper(this)" /></div>
+          </div>
+          <div style="margin-top:14px;"><button class="btn btn-primary btn-sm" onclick="addMotivo()">+ Adicionar</button></div>
+        </div>
+        <div class="table-container"><div class="table-scroll">
+          <table class="data-table"><thead><tr><th>Motivo</th><th></th></tr></thead>
+          <tbody id="motivos-tbody"></tbody></table>
+        </div></div>
+      </div>
+
+      <!-- Robôs -->
+      <div class="cad-panel" id="cad-robos">
+        <div class="form-card">
+          <div class="form-card-title">Novo Robô</div>
+          <div class="form-grid">
+            <div><label class="field-label">ID Robô</label><input type="text" id="robo-id" placeholder="ID" oninput="toUpper(this)" /></div>
+            <div><label class="field-label">OEE (%)</label><input type="number" id="robo-oee" placeholder="Ex: 85" min="0" max="100" /></div>
+            <div><label class="field-label">Turnos Trabalhados</label><input type="number" id="robo-turnos" placeholder="Ex: 3" min="1" /></div>
+            <div><label class="field-label">Horas por Turno</label><input type="text" id="robo-horas" placeholder="Ex: 08:00" pattern="\d{1,2}:\d{2}" /></div>
+          </div>
+          <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <button class="btn btn-primary btn-sm" onclick="addRobo()">+ Adicionar</button>
+            <label class="btn btn-ghost btn-sm" style="cursor:pointer;">
+              📊 Importar Planilha
+              <input type="file" accept=".xlsx,.xls" onchange="importRobos(event)" style="display:none;" />
+            </label>
+            <span class="text-muted">Colunas: ID ROBÔ | OEE (%) | TURNOS | HORAS/TURNO · Total = (Horas × Turnos) × (OEE/100)</span>
+          </div>
+        </div>
+        <div class="table-container"><div class="table-scroll">
+          <table class="data-table"><thead><tr><th>ID Robô</th><th>OEE</th><th>Turnos</th><th>H/Turno</th><th>Total Efetivo</th><th></th></tr></thead>
+          <tbody id="robos-tbody"></tbody></table>
+        </div></div>
+      </div>
+
+      <!-- Buffer / Item × Robô -->
+      <div class="cad-panel" id="cad-buffer">
+        <div class="form-card">
+          <div class="form-card-title">Item × Robô — Tempo de Ciclo por Peça</div>
+          <div class="form-grid">
+            <div><label class="field-label">Referência Pai</label><input type="text" id="buf-ref" placeholder="Ref. Pai" oninput="toUpper(this)" /></div>
+            <div><label class="field-label">Robô</label><input type="text" id="buf-robo" placeholder="ID Robô" oninput="toUpper(this)" /></div>
+            <div><label class="field-label">Tempo de Ciclo (HH:MM:SS)</label><input type="text" id="buf-tempo" placeholder="Ex: 00:02:30" pattern="\d{1,2}:\d{2}:\d{2}" /></div>
+          </div>
+          <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <button class="btn btn-primary btn-sm" onclick="addBuffer()">+ Adicionar / Atualizar</button>
+            <label class="btn btn-ghost btn-sm" style="cursor:pointer;">
+              📊 Importar Planilha
+              <input type="file" accept=".xlsx,.xls" onchange="importBuffer(event)" style="display:none;" />
+            </label>
+            <span class="text-muted">Colunas: REFERENCIA PAI | ROBO | TEMPO COBERTURA (HH:MM:SS)</span>
+          </div>
+        </div>
+        <div class="table-container"><div class="table-scroll">
+          <table class="data-table"><thead><tr><th>Referência Pai</th><th>Robô</th><th>Tempo de Ciclo</th><th></th></tr></thead>
+          <tbody id="buffer-tbody"></tbody></table>
+        </div></div>
+      </div>
+    </div>
+
+    <!-- INDICADORES -->
+    <div class="screen" id="screen-indicadores">
+      <div class="page-header"><div class="page-title">📊 Indicadores</div></div>
+
+      <div class="ind-section">
+        <div class="ind-section-title">🤖 Buffer por Robô de Solda — Kits Aguardando</div>
+        <div id="chart-buffer"><div class="chart-empty">Carregando...</div></div>
+      </div>
+
+      <div class="ind-section">
+        <div class="ind-section-title">⏳ Tempo Médio Aguardando + Top 5 Mais Antigos</div>
+        <div id="chart-espera"><div class="chart-empty">Carregando...</div></div>
+      </div>
+
+      <div class="ind-section">
+        <div class="ind-section-title">⚠️ Análise de Divergências</div>
+        <div id="chart-div"><div class="chart-empty">Carregando...</div></div>
+      </div>
+    </div>
+
+    <!-- USUÁRIOS -->
+    <div class="screen" id="screen-usuarios">
+      <div class="page-header"><div class="page-title">👥 Gerenciar Usuários</div></div>
+      <div class="table-container"><div class="table-scroll">
+        <table class="data-table">
+          <thead><tr><th>Nome</th><th>E-mail</th><th>Turno</th><th>Permissão</th><th>Alterar</th></tr></thead>
+          <tbody id="users-tbody"></tbody>
+        </table>
+      </div></div>
+    </div>
+
+  </div><!-- /app-body -->
+</div><!-- /app-section -->
+
+<!-- MODAL ENTREGAR -->
+<div class="modal-overlay" id="modal-entregar">
+  <div class="modal-box">
+    <div class="modal-title">🚀 Entregar para Produção</div>
+    <div class="field-group">
+      <label class="field-label">Checklist <span class="required">*</span></label>
+      <input type="text" list="entregar-checklist-list" id="entregar-checklist-input" placeholder="Digite ou selecione o checklist..." style="text-transform:uppercase;" />
+      <datalist id="entregar-checklist-list"></datalist>
+    </div>
+    <div class="field-group"><label class="field-label">Entregue Por</label><input type="text" id="entregar-por" readonly style="opacity:.7;" /></div>
+    <div class="field-group"><label class="field-label">Turno</label><input type="text" id="entregar-turno" readonly style="opacity:.7;" /></div>
+    <div class="field-group">
+      <label class="field-label">Entregue Para (Operador) <span class="required">*</span></label>
+      <input type="text" list="entregar-para-list" id="entregar-para-input" placeholder="Digite ou selecione..." style="text-transform:uppercase;" />
+      <datalist id="entregar-para-list"></datalist>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeEntregarModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="confirmarEntrega()">✓ Confirmar Entrega</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL MASTER -->
+<div class="modal-overlay" id="modal-master">
+  <div class="modal-box">
+    <div class="modal-title">🔑 Acesso Master Temporário</div>
+    <p style="color:var(--text2);margin-bottom:16px;font-size:13px;">Este acesso é <strong style="color:var(--amber)">temporário</strong>. Use o botão <em>"Sair do Master"</em> na barra superior para restaurar sua permissão original.</p>
+    <div class="field-group"><label class="field-label">Senha Master</label>
+      <div class="field-row">
+        <input type="password" id="master-pass-input" placeholder="Senha master" />
+        <button class="toggle-pass" type="button" onclick="const i=document.getElementById('master-pass-input');i.type=i.type==='password'?'text':'password';this.textContent=i.type==='password'?'👁':'🙈';">👁</button>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeMasterModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="applyMasterPassword()">Confirmar</button>
+    </div>
+  </div>
+</div>
+
+<div class="app-footer">Elaborado por Gênesis A. Gonçalves</div>
+
+<script>
+function switchCadTab(tab,el){
+  document.querySelectorAll(".cad-tab").forEach(t=>t.classList.remove("active"));
+  document.querySelectorAll(".cad-panel").forEach(p=>p.classList.remove("active"));
+  el.classList.add("active");
+  document.getElementById("cad-"+tab).classList.add("active");
+}
+window.toUpper=function(el){el.value=el.value.toUpperCase();};
+</script>
+</body>
+</html>
