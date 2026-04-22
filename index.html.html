@@ -1,0 +1,1629 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KitControl — Magius</title>
+
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import {
+    getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword,
+    sendPasswordResetEmail, onAuthStateChanged, signOut, updatePassword
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+  import {
+    getFirestore, collection, doc, addDoc, setDoc, getDoc, getDocs,
+    updateDoc, deleteDoc, query, where, orderBy, onSnapshot, serverTimestamp, Timestamp
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+  // ============================================================
+  // FIREBASE CONFIG — substitua pelos seus dados do Firebase
+  // ============================================================
+  const firebaseConfig = {
+    apiKey: "YOUR_API_KEY",
+    authDomain: "YOUR_PROJECT.firebaseapp.com",
+    projectId: "YOUR_PROJECT_ID",
+    storageBucket: "YOUR_PROJECT.appspot.com",
+    messagingSenderId: "YOUR_SENDER_ID",
+    appId: "YOUR_APP_ID"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+
+  // ============================================================
+  // GLOBALS
+  // ============================================================
+  let currentUser = null;
+  let currentUserData = null;
+  const MASTER_PASSWORD = "LOG#001";
+
+  // ============================================================
+  // UTILS
+  // ============================================================
+  function fmtDate(d) {
+    if (!d) return "";
+    if (d.toDate) d = d.toDate();
+    const dd = String(d.getDate()).padStart(2,"0");
+    const mm = String(d.getMonth()+1).padStart(2,"0");
+    const yy = String(d.getFullYear()).slice(-2);
+    return `${dd}/${mm}/${yy}`;
+  }
+  function fmtTime(d) {
+    if (!d) return "";
+    if (d.toDate) d = d.toDate();
+    return `${String(d.getHours()).padStart(2,"0")}:${String(d.getMinutes()).padStart(2,"0")}`;
+  }
+  function fmtLeadTime(ms) {
+    if (!ms || ms < 0) return "—";
+    const totalMin = Math.floor(ms/60000);
+    const days = Math.floor(totalMin/1440);
+    const hours = Math.floor((totalMin%1440)/60);
+    const mins = totalMin%60;
+    return `${days}d | ${String(hours).padStart(2,"0")}:${String(mins).padStart(2,"0")}`;
+  }
+  function now() { return new Date(); }
+  function showToast(msg, type="info") {
+    const t = document.createElement("div");
+    t.className = `toast toast-${type}`;
+    t.textContent = msg;
+    document.getElementById("toast-container").appendChild(t);
+    setTimeout(()=>t.classList.add("show"),10);
+    setTimeout(()=>{ t.classList.remove("show"); setTimeout(()=>t.remove(),400); }, 3500);
+  }
+  function loading(show) {
+    document.getElementById("global-loading").style.display = show ? "flex" : "none";
+  }
+  function can(action) {
+    if (!currentUserData) return false;
+    const p = currentUserData.permissao;
+    if (p === "adm_master") return true;
+    if (action === "visualizar") return true;
+    if (p === "visualizador") return false;
+    if (action === "operar") return ["operador","adm_basico","adm_master"].includes(p);
+    if (action === "editar_endereco") return ["operador","adm_basico","adm_master"].includes(p);
+    if (action === "editar_tudo") return ["adm_basico","adm_master"].includes(p);
+    if (action === "excluir") return ["adm_basico","adm_master"].includes(p);
+    if (action === "gerenciar_usuarios") return p === "adm_master";
+    return false;
+  }
+  function fmtDateInput(d) {
+    if (!d) return "";
+    if (d.toDate) d = d.toDate();
+    return d.toISOString().split("T")[0];
+  }
+
+  // ============================================================
+  // NAVIGATION
+  // ============================================================
+  function navigate(screen) {
+    document.querySelectorAll(".screen").forEach(s=>s.classList.remove("active"));
+    document.querySelectorAll(".nav-btn").forEach(b=>b.classList.remove("active"));
+    const el = document.getElementById(`screen-${screen}`);
+    if (el) el.classList.add("active");
+    const nb = document.querySelector(`[data-nav="${screen}"]`);
+    if (nb) nb.classList.add("active");
+    // refresh content
+    if (screen === "kits") loadKitsTable();
+    if (screen === "historico") loadHistoricoTable();
+    if (screen === "divergencias") loadDivergenciasTable();
+    if (screen === "cadastros") loadCadastros();
+    if (screen === "usuarios") loadUsuarios();
+  }
+
+  // ============================================================
+  // AUTH
+  // ============================================================
+  onAuthStateChanged(auth, async user => {
+    if (user) {
+      currentUser = user;
+      const snap = await getDoc(doc(db,"usuarios",user.uid));
+      if (snap.exists()) {
+        currentUserData = snap.data();
+        showApp();
+        navigate("kits");
+      } else {
+        // new user, needs to complete registration - shouldn't happen via normal flow
+        await signOut(auth);
+        showLogin();
+      }
+    } else {
+      currentUser = null;
+      currentUserData = null;
+      showLogin();
+    }
+  });
+
+  function showLogin() {
+    document.getElementById("auth-section").style.display = "flex";
+    document.getElementById("app-section").style.display = "none";
+    showAuthPanel("login");
+  }
+  function showApp() {
+    document.getElementById("auth-section").style.display = "none";
+    document.getElementById("app-section").style.display = "flex";
+    document.getElementById("user-name-display").textContent = currentUserData?.nome || currentUser?.email;
+    document.getElementById("user-turno-display").textContent = currentUserData?.turno || "";
+    // show/hide admin nav
+    document.getElementById("nav-usuarios").style.display = can("gerenciar_usuarios") ? "flex" : "none";
+  }
+  function showAuthPanel(panel) {
+    document.querySelectorAll(".auth-panel").forEach(p=>p.style.display="none");
+    document.getElementById(`auth-${panel}`).style.display="block";
+  }
+
+  // Login
+  window.doLogin = async function() {
+    const email = document.getElementById("login-email").value.trim();
+    const pass = document.getElementById("login-pass").value;
+    if (!email || !pass) return showToast("Preencha email e senha","warning");
+    loading(true);
+    try {
+      await signInWithEmailAndPassword(auth, email, pass);
+    } catch(e) {
+      showToast("Email ou senha inválidos","error");
+    }
+    loading(false);
+  };
+
+  // Register
+  window.doRegister = async function() {
+    const nome = document.getElementById("reg-nome").value.trim();
+    const email = document.getElementById("reg-email").value.trim();
+    const pass = document.getElementById("reg-pass").value;
+    const pass2 = document.getElementById("reg-pass2").value;
+    const turno = document.getElementById("reg-turno").value;
+    if (!nome||!email||!pass||!pass2||!turno) return showToast("Preencha todos os campos","warning");
+    if (pass !== pass2) return showToast("Senhas não coincidem","error");
+    if (pass.length < 6) return showToast("Senha mínimo 6 caracteres","warning");
+    loading(true);
+    try {
+      const cred = await createUserWithEmailAndPassword(auth, email, pass);
+      await setDoc(doc(db,"usuarios",cred.user.uid), {
+        nome, email, turno, permissao: "operador",
+        criadoEm: serverTimestamp()
+      });
+      showToast("Cadastro realizado com sucesso!","success");
+    } catch(e) {
+      showToast(e.message,"error");
+    }
+    loading(false);
+  };
+
+  window.doForgotPassword = async function() {
+    const email = document.getElementById("forgot-email").value.trim();
+    if (!email) return showToast("Informe o email","warning");
+    try {
+      await sendPasswordResetEmail(auth, email);
+      showToast("Email de recuperação enviado!","success");
+      showAuthPanel("login");
+    } catch(e) {
+      showToast("Erro ao enviar email","error");
+    }
+  };
+
+  window.doLogout = async function() {
+    await signOut(auth);
+  };
+
+  // ============================================================
+  // KITS — RECEBIMENTO
+  // ============================================================
+  window.submitRecebimento = async function() {
+    const checklist = document.getElementById("rec-checklist").value.trim();
+    const noop = document.getElementById("rec-noop").value.trim();
+    const refpai = document.getElementById("rec-refpai").value.trim();
+    const qtdkit = parseInt(document.getElementById("rec-qtdkit").value);
+    const volumes = parseInt(document.getElementById("rec-volumes").value);
+    const endereco = document.getElementById("rec-endereco").value.trim();
+    const dataprev = document.getElementById("rec-dataprev").value;
+    if (!checklist||!noop||!refpai||!qtdkit||!volumes||!endereco||!dataprev)
+      return showToast("Preencha todos os campos obrigatórios","warning");
+
+    // check duplicidade
+    const snap = await getDocs(query(collection(db,"kits_aguardando"), where("checklist","==",checklist)));
+    if (!snap.empty) return showToast("Checklist já existe em KITS AGUARDANDO ENTREGA","error");
+    const snap2 = await getDocs(query(collection(db,"historico_entregues"), where("checklist","==",checklist)));
+    if (!snap2.empty) return showToast("Checklist já existe no HISTÓRICO DE ENTREGUES","error");
+
+    // check divergência
+    const snapDiv = await getDocs(query(collection(db,"divergencias"), where("checklist","==",checklist), where("tratativa","==","PENDENTE")));
+
+    if (!snapDiv.empty) {
+      const ok = confirm(`⚠️ Esse checklist possui divergência registrada. Deseja continuar?`);
+      if (!ok) return;
+    }
+
+    // busca buffer
+    const bufferSnap = await getDocs(query(collection(db,"buffer_robos"), where("referenciaPai","==",refpai)));
+    let postoSolda = "—", tempoCobertura = "—";
+    if (!bufferSnap.empty) {
+      const bd = bufferSnap.docs[0].data();
+      postoSolda = bd.robo || "—";
+      tempoCobertura = bd.tempoCobertura || "—";
+    }
+
+    const ts = now();
+    loading(true);
+    try {
+      const docRef = await addDoc(collection(db,"kits_aguardando"), {
+        dataRegistro: Timestamp.fromDate(ts),
+        checklist, noOp: noop, referenciaPai: refpai,
+        quantKit: qtdkit, volumes, endereco,
+        turnoRecebimento: currentUserData.turno,
+        conferidoPor: currentUserData.nome,
+        conferidoPorUid: currentUser.uid,
+        postoSolda, tempoCobertura,
+        dataPrevEntrega: dataprev
+      });
+
+      // resolve divergência se houver
+      if (!snapDiv.empty) {
+        for (const dv of snapDiv.docs) {
+          const entradaMs = dv.data().dataRegistro?.toDate()?.getTime() || ts.getTime();
+          const leadTimeMs = ts.getTime() - entradaMs;
+          await updateDoc(doc(db,"divergencias",dv.id), {
+            tratativa: "SOLUCIONADO",
+            leadTimeMs,
+            leadTimeFormatado: fmtLeadTime(leadTimeMs),
+            dataSolucao: Timestamp.fromDate(ts)
+          });
+        }
+      }
+
+      document.getElementById("form-recebimento").reset();
+      showToast("Kit registrado com sucesso!","success");
+      navigate("kits");
+    } catch(e) { showToast("Erro: "+e.message,"error"); }
+    loading(false);
+  };
+
+  // ============================================================
+  // KITS TABLE
+  // ============================================================
+  let kitsListener = null;
+  async function loadKitsTable() {
+    if (kitsListener) kitsListener();
+    const tbody = document.getElementById("kits-tbody");
+    tbody.innerHTML = `<tr><td colspan="12" class="loading-row">Carregando...</td></tr>`;
+
+    kitsListener = onSnapshot(query(collection(db,"kits_aguardando"), orderBy("dataRegistro","desc")), snap => {
+      const filters = getKitsFilters();
+      let rows = snap.docs.map(d=>({id:d.id,...d.data()}));
+      rows = applyKitsFilters(rows, filters);
+      renderKitsTable(rows);
+    });
+  }
+
+  function getKitsFilters() {
+    return {
+      data: document.getElementById("filter-kits-data")?.value || "",
+      checklist: document.getElementById("filter-kits-checklist")?.value?.toLowerCase() || "",
+      refpai: document.getElementById("filter-kits-refpai")?.value?.toLowerCase() || "",
+      posto: document.getElementById("filter-kits-posto")?.value?.toLowerCase() || "",
+      endereco: document.getElementById("filter-kits-endereco")?.value?.toLowerCase() || ""
+    };
+  }
+
+  function applyKitsFilters(rows, f) {
+    return rows.filter(r => {
+      if (f.data && fmtDateInput(r.dataRegistro) !== f.data) return false;
+      if (f.checklist && !r.checklist?.toLowerCase().includes(f.checklist)) return false;
+      if (f.refpai && !r.referenciaPai?.toLowerCase().includes(f.refpai)) return false;
+      if (f.posto && !r.postoSolda?.toLowerCase().includes(f.posto)) return false;
+      if (f.endereco && !r.endereco?.toLowerCase().includes(f.endereco)) return false;
+      return true;
+    });
+  }
+
+  function renderKitsTable(rows) {
+    const tbody = document.getElementById("kits-tbody");
+    if (!rows.length) { tbody.innerHTML = `<tr><td colspan="12" class="empty-row">Nenhum kit encontrado</td></tr>`; return; }
+    tbody.innerHTML = rows.map(r => `
+      <tr>
+        <td>${fmtDate(r.dataRegistro)}</td>
+        <td>${fmtTime(r.dataRegistro)}</td>
+        <td><span class="badge-checklist">${r.checklist||""}</span></td>
+        <td>${r.noOp||""}</td>
+        <td>${r.referenciaPai||""}</td>
+        <td>${r.quantKit||""}</td>
+        <td><span class="badge-turno">${r.turnoRecebimento||""}</span></td>
+        <td>${r.conferidoPor||""}</td>
+        <td>${r.volumes||""}</td>
+        <td>${r.postoSolda||"—"}</td>
+        <td>${r.tempoCobertura||"—"}</td>
+        <td>
+          <div class="cell-endereco">
+            ${can("editar_tudo") || can("editar_endereco") ?
+              `<input class="inline-edit" value="${r.endereco||""}" onblur="saveEndereco('${r.id}',this.value)" />` :
+              `<span>${r.endereco||""}</span>`}
+          </div>
+        </td>
+        <td class="actions-cell">
+          ${can("excluir") ? `<button class="btn-icon danger" onclick="deleteKit('${r.id}')" title="Excluir">🗑</button>` : ""}
+        </td>
+      </tr>`).join("");
+  }
+
+  window.saveEndereco = async function(id, val) {
+    try { await updateDoc(doc(db,"kits_aguardando",id),{endereco:val}); }
+    catch(e){ showToast("Erro ao salvar","error"); }
+  };
+
+  window.deleteKit = async function(id) {
+    if (!can("excluir")) return showToast("Sem permissão","error");
+    if (!confirm("Excluir este kit?")) return;
+    await deleteDoc(doc(db,"kits_aguardando",id));
+    showToast("Kit excluído","success");
+  };
+
+  window.applyKitsFilter = function() { loadKitsTable(); };
+
+  // ============================================================
+  // ENTREGAR KIT
+  // ============================================================
+  window.openEntregarModal = async function() {
+    // populate checklist select
+    const snap = await getDocs(query(collection(db,"kits_aguardando"), orderBy("dataRegistro","desc")));
+    const sel = document.getElementById("entregar-checklist");
+    sel.innerHTML = `<option value="">Selecione ou digite...</option>` +
+      snap.docs.map(d=>`<option value="${d.id}||${d.data().checklist}">${d.data().checklist}</option>`).join("");
+
+    // populate operadores
+    const opSnap = await getDocs(collection(db,"operadores"));
+    const opSel = document.getElementById("entregar-para");
+    opSel.innerHTML = `<option value="">Selecione operador...</option>` +
+      opSnap.docs.map(d=>`<option value="${d.data().nome}">${d.data().nome} — ${d.data().setor}</option>`).join("");
+
+    document.getElementById("entregar-por").value = currentUserData.nome;
+    document.getElementById("entregar-turno").value = currentUserData.turno;
+    document.getElementById("modal-entregar").style.display = "flex";
+  };
+
+  window.closeEntregarModal = function() {
+    document.getElementById("modal-entregar").style.display = "none";
+  };
+
+  window.confirmarEntrega = async function() {
+    const selVal = document.getElementById("entregar-checklist").value;
+    const entregueParaVal = document.getElementById("entregar-para").value;
+    if (!selVal) return showToast("Selecione um checklist","warning");
+    if (!entregueParaVal) return showToast("Selecione o operador","warning");
+
+    const [kitId, checklist] = selVal.split("||");
+    const kitSnap = await getDoc(doc(db,"kits_aguardando",kitId));
+    if (!kitSnap.exists()) return showToast("Kit não encontrado","error");
+    const kitData = kitSnap.data();
+
+    const ts = now();
+    const registroTs = kitData.dataRegistro?.toDate() || ts;
+    const leadTimeMs = ts.getTime() - registroTs.getTime();
+
+    loading(true);
+    try {
+      await addDoc(collection(db,"historico_entregues"), {
+        ...kitData,
+        dataEntrega: Timestamp.fromDate(ts),
+        entregueFor: currentUserData.nome,
+        turnoEntrega: currentUserData.turno,
+        entreguePara: entregueParaVal,
+        leadTimeMs, leadTimeFormatado: fmtLeadTime(leadTimeMs)
+      });
+      await deleteDoc(doc(db,"kits_aguardando",kitId));
+      closeEntregarModal();
+      showToast("Kit entregue com sucesso!","success");
+      navigate("historico");
+    } catch(e) { showToast("Erro: "+e.message,"error"); }
+    loading(false);
+  };
+
+  // ============================================================
+  // HISTÓRICO ENTREGUES
+  // ============================================================
+  async function loadHistoricoTable() {
+    const snap = await getDocs(query(collection(db,"historico_entregues"), orderBy("dataEntrega","desc")));
+    const filters = {
+      data: document.getElementById("filter-hist-data")?.value || "",
+      checklist: document.getElementById("filter-hist-checklist")?.value?.toLowerCase() || ""
+    };
+    let rows = snap.docs.map(d=>({id:d.id,...d.data()})).filter(r=>{
+      if (filters.data && fmtDateInput(r.dataRegistro) !== filters.data) return false;
+      if (filters.checklist && !r.checklist?.toLowerCase().includes(filters.checklist)) return false;
+      return true;
+    });
+    const tbody = document.getElementById("hist-tbody");
+    if (!rows.length) { tbody.innerHTML=`<tr><td colspan="17" class="empty-row">Nenhum registro</td></tr>`; return; }
+    tbody.innerHTML = rows.map(r=>`
+      <tr>
+        <td>${fmtDate(r.dataRegistro)}</td>
+        <td>${fmtTime(r.dataRegistro)}</td>
+        <td><span class="badge-checklist">${r.checklist||""}</span></td>
+        <td>${r.noOp||""}</td>
+        <td>${r.referenciaPai||""}</td>
+        <td>${r.quantKit||""}</td>
+        <td><span class="badge-turno">${r.turnoRecebimento||""}</span></td>
+        <td>${r.conferidoPor||""}</td>
+        <td>${r.volumes||""}</td>
+        <td>${r.postoSolda||"—"}</td>
+        <td>${r.tempoCobertura||"—"}</td>
+        <td>${r.endereco||""}</td>
+        <td>${fmtDate(r.dataEntrega)}</td>
+        <td>${fmtTime(r.dataEntrega)}</td>
+        <td>${r.entregueFor||""}</td>
+        <td><span class="badge-turno">${r.turnoEntrega||""}</span></td>
+        <td>${r.entreguePara||""}</td>
+        <td><span class="badge-lead">${r.leadTimeFormatado||"—"}</span></td>
+        <td class="actions-cell">
+          ${can("excluir")?`<button class="btn-icon danger" onclick="deleteHistorico('${r.id}')">🗑</button>`:""}
+        </td>
+      </tr>`).join("");
+  }
+
+  window.deleteHistorico = async function(id) {
+    if (!can("excluir")) return showToast("Sem permissão","error");
+    if (!confirm("Excluir registro?")) return;
+    await deleteDoc(doc(db,"historico_entregues",id));
+    showToast("Excluído","success");
+    loadHistoricoTable();
+  };
+
+  window.applyHistFilter = function() { loadHistoricoTable(); };
+
+  // ============================================================
+  // DIVERGÊNCIAS
+  // ============================================================
+  window.submitDivergencia = async function() {
+    const checklist = document.getElementById("div-checklist").value.trim();
+    const noop = document.getElementById("div-noop").value.trim();
+    const refpai = document.getElementById("div-refpai").value.trim();
+    const qtd = parseInt(document.getElementById("div-qtd").value);
+    const motivo = document.getElementById("div-motivo").value;
+    const dataprev = document.getElementById("div-dataprev").value;
+    const codpeca = document.getElementById("div-codpeca").value.trim();
+    const qntpecas = document.getElementById("div-qntpecas").value.trim();
+    const respkit = document.getElementById("div-respkit").value.trim();
+    if (!checklist||!noop||!refpai||!qtd||!motivo||!dataprev)
+      return showToast("Preencha todos os campos obrigatórios","warning");
+
+    const ts = now();
+    loading(true);
+    try {
+      await addDoc(collection(db,"divergencias"), {
+        dataRegistro: Timestamp.fromDate(ts),
+        checklist, noOp: noop, referenciaPai: refpai,
+        quantidade: qtd, motivoDivergencia: motivo,
+        dataPrevEntrega: dataprev,
+        codigoPeca: codpeca, quantidadePecas: qntpecas,
+        responsavelKit: respkit,
+        turnoConferente: currentUserData.turno,
+        conferente: currentUserData.nome,
+        conferenteUid: currentUser.uid,
+        tratativa: "PENDENTE",
+        leadTimeMs: null, leadTimeFormatado: "PENDENTE"
+      });
+      document.getElementById("form-divergencia").reset();
+      showToast("Divergência registrada!","success");
+      navigate("divergencias");
+    } catch(e) { showToast("Erro: "+e.message,"error"); }
+    loading(false);
+  };
+
+  async function loadDivergenciasTable() {
+    const snap = await getDocs(query(collection(db,"divergencias"), orderBy("dataRegistro","desc")));
+    const filters = {
+      data: document.getElementById("filter-div-data")?.value||"",
+      checklist: document.getElementById("filter-div-checklist")?.value?.toLowerCase()||"",
+      refpai: document.getElementById("filter-div-refpai")?.value?.toLowerCase()||"",
+      motivo: document.getElementById("filter-div-motivo")?.value?.toLowerCase()||"",
+      tratativa: document.getElementById("filter-div-tratativa")?.value||""
+    };
+    let rows = snap.docs.map(d=>({id:d.id,...d.data()})).filter(r=>{
+      if (filters.data && fmtDateInput(r.dataRegistro) !== filters.data) return false;
+      if (filters.checklist && !r.checklist?.toLowerCase().includes(filters.checklist)) return false;
+      if (filters.refpai && !r.referenciaPai?.toLowerCase().includes(filters.refpai)) return false;
+      if (filters.motivo && !r.motivoDivergencia?.toLowerCase().includes(filters.motivo)) return false;
+      if (filters.tratativa && r.tratativa !== filters.tratativa) return false;
+      return true;
+    });
+    const tbody = document.getElementById("div-tbody");
+    if (!rows.length) { tbody.innerHTML=`<tr><td colspan="16" class="empty-row">Nenhuma divergência</td></tr>`; return; }
+    tbody.innerHTML = rows.map(r=>`
+      <tr class="${r.tratativa==='SOLUCIONADO'?'row-solved':'row-pending'}">
+        <td>${fmtDate(r.dataRegistro)}</td>
+        <td>${fmtTime(r.dataRegistro)}</td>
+        <td>${r.dataPrevEntrega||""}</td>
+        <td><span class="badge-checklist">${r.checklist||""}</span></td>
+        <td>${r.noOp||""}</td>
+        <td>${r.referenciaPai||""}</td>
+        <td>${r.quantidade||""}</td>
+        <td>${r.motivoDivergencia||""}</td>
+        <td>${r.codigoPeca||"—"}</td>
+        <td>${r.quantidadePecas||"—"}</td>
+        <td>${r.responsavelKit||"—"}</td>
+        <td><span class="badge-turno">${r.turnoConferente||""}</span></td>
+        <td>${r.conferente||""}</td>
+        <td><span class="badge-tratativa ${r.tratativa==='SOLUCIONADO'?'solved':'pending'}">${r.tratativa}</span></td>
+        <td><span class="badge-lead">${r.leadTimeFormatado||"PENDENTE"}</span></td>
+        <td class="actions-cell">
+          ${can("excluir")?`<button class="btn-icon danger" onclick="deleteDivergencia('${r.id}')">🗑</button>`:""}
+        </td>
+      </tr>`).join("");
+  }
+
+  window.deleteDivergencia = async function(id) {
+    if (!can("excluir")) return showToast("Sem permissão","error");
+    if (!confirm("Excluir divergência?")) return;
+    await deleteDoc(doc(db,"divergencias",id));
+    showToast("Excluído","success");
+    loadDivergenciasTable();
+  };
+
+  window.applyDivFilter = function() { loadDivergenciasTable(); };
+
+  // ============================================================
+  // CADASTROS
+  // ============================================================
+  async function loadCadastros() {
+    loadOperadores();
+    loadMotivos();
+    loadRobos();
+    loadBuffer();
+  }
+
+  // -- Operadores --
+  async function loadOperadores() {
+    const snap = await getDocs(collection(db,"operadores"));
+    const tbody = document.getElementById("op-tbody");
+    tbody.innerHTML = snap.empty ? `<tr><td colspan="3" class="empty-row">Nenhum operador</td></tr>` :
+      snap.docs.map(d=>`<tr>
+        <td>${d.data().nome}</td><td>${d.data().setor}</td>
+        <td class="actions-cell">${can("excluir")?`<button class="btn-icon danger" onclick="deleteItem('operadores','${d.id}',loadOperadores)">🗑</button>`:""}
+        ${can("editar_tudo")?`<button class="btn-icon" onclick="editOperador('${d.id}','${d.data().nome}','${d.data().setor}')">✏️</button>`:""}
+        </td></tr>`).join("");
+    populateMotivosSelect();
+  }
+
+  window.addOperador = async function() {
+    const nome = document.getElementById("op-nome").value.trim();
+    const setor = document.getElementById("op-setor").value.trim();
+    if (!nome||!setor) return showToast("Preencha nome e setor","warning");
+    await addDoc(collection(db,"operadores"),{nome,setor});
+    document.getElementById("op-nome").value="";
+    document.getElementById("op-setor").value="";
+    loadOperadores();
+    showToast("Operador cadastrado","success");
+  };
+
+  window.editOperador = async function(id, nome, setor) {
+    const newNome = prompt("Nome:", nome);
+    if (newNome===null) return;
+    const newSetor = prompt("Setor:", setor);
+    if (newSetor===null) return;
+    await updateDoc(doc(db,"operadores",id),{nome:newNome, setor:newSetor});
+    loadOperadores();
+  };
+
+  // -- Motivos --
+  const DEFAULT_MOTIVOS = ["SOBRA DE PEÇA","FALTA DE PEÇA","PEÇA ERRADA","FALTA DE PROCESSO","QUALIDADE","FORA DO PADRÃO/EMBALAGEM","SEM ETIQUETA NOS COMPONENTES","ID DO COMPONENTE DIVERGENTE"];
+
+  async function initMotivos() {
+    const snap = await getDocs(collection(db,"motivos_divergencia"));
+    if (snap.empty) {
+      for (const m of DEFAULT_MOTIVOS) await addDoc(collection(db,"motivos_divergencia"),{motivo:m});
+    }
+    loadMotivos();
+  }
+
+  async function loadMotivos() {
+    const snap = await getDocs(collection(db,"motivos_divergencia"));
+    const tbody = document.getElementById("motivos-tbody");
+    tbody.innerHTML = snap.empty ? `<tr><td colspan="2" class="empty-row">—</td></tr>` :
+      snap.docs.map(d=>`<tr>
+        <td>${d.data().motivo}</td>
+        <td class="actions-cell">${can("excluir")?`<button class="btn-icon danger" onclick="deleteItem('motivos_divergencia','${d.id}',loadMotivos)">🗑</button>`:""}
+        </td></tr>`).join("");
+    populateMotivosSelect();
+  }
+
+  async function populateMotivosSelect() {
+    const snap = await getDocs(collection(db,"motivos_divergencia"));
+    const sel = document.getElementById("div-motivo");
+    if (!sel) return;
+    sel.innerHTML = `<option value="">Selecione...</option>` +
+      snap.docs.map(d=>`<option value="${d.data().motivo}">${d.data().motivo}</option>`).join("");
+  }
+
+  window.addMotivo = async function() {
+    const m = document.getElementById("motivo-novo").value.trim().toUpperCase();
+    if (!m) return showToast("Digite o motivo","warning");
+    await addDoc(collection(db,"motivos_divergencia"),{motivo:m});
+    document.getElementById("motivo-novo").value="";
+    loadMotivos();
+    showToast("Motivo cadastrado","success");
+  };
+
+  // -- Robôs --
+  async function loadRobos() {
+    const snap = await getDocs(collection(db,"robos"));
+    const tbody = document.getElementById("robos-tbody");
+    tbody.innerHTML = snap.empty ? `<tr><td colspan="6" class="empty-row">Nenhum robô</td></tr>` :
+      snap.docs.map(d=>{
+        const r = d.data();
+        const totalMin = (r.horasPorTurno*60*r.turnosTrabalhados)*(r.oee/100);
+        const days = Math.floor(totalMin/1440);
+        const hours = Math.floor((totalMin%1440)/60);
+        const mins = Math.floor(totalMin%60);
+        const secs = Math.round((totalMin - Math.floor(totalMin))*60);
+        const fmt = `${days}d | ${String(hours).padStart(2,"0")}:${String(mins).padStart(2,"0")}:${String(secs).padStart(2,"0")}`;
+        return `<tr>
+          <td>${r.idRobo}</td><td>${r.oee}%</td><td>${r.turnosTrabalhados}</td>
+          <td>${r.horasPorTurno}h</td><td><span class="badge-lead">${fmt}</span></td>
+          <td class="actions-cell">${can("excluir")?`<button class="btn-icon danger" onclick="deleteItem('robos','${d.id}',loadRobos)">🗑</button>`:""}
+          ${can("editar_tudo")?`<button class="btn-icon" onclick="editRobo('${d.id}')">✏️</button>`:""}
+          </td></tr>`;
+      }).join("");
+  }
+
+  window.addRobo = async function() {
+    const idRobo = document.getElementById("robo-id").value.trim();
+    const oee = parseFloat(document.getElementById("robo-oee").value);
+    const turnos = parseInt(document.getElementById("robo-turnos").value);
+    const horas = parseFloat(document.getElementById("robo-horas").value);
+    if (!idRobo||isNaN(oee)||isNaN(turnos)||isNaN(horas)) return showToast("Preencha todos os campos","warning");
+    await addDoc(collection(db,"robos"),{idRobo,oee,turnosTrabalhados:turnos,horasPorTurno:horas});
+    document.getElementById("robo-id").value="";
+    document.getElementById("robo-oee").value="";
+    document.getElementById("robo-turnos").value="";
+    document.getElementById("robo-horas").value="";
+    loadRobos();
+    showToast("Robô cadastrado","success");
+  };
+
+  window.editRobo = async function(id) {
+    const snap = await getDoc(doc(db,"robos",id));
+    if (!snap.exists()) return;
+    const r = snap.data();
+    const oee = prompt("OEE (%):", r.oee);
+    if (oee===null) return;
+    const turnos = prompt("Turnos trabalhados:", r.turnosTrabalhados);
+    if (turnos===null) return;
+    const horas = prompt("Horas por turno:", r.horasPorTurno);
+    if (horas===null) return;
+    await updateDoc(doc(db,"robos",id),{oee:parseFloat(oee),turnosTrabalhados:parseInt(turnos),horasPorTurno:parseFloat(horas)});
+    loadRobos();
+  };
+
+  // -- Buffer --
+  async function loadBuffer() {
+    const snap = await getDocs(collection(db,"buffer_robos"));
+    const tbody = document.getElementById("buffer-tbody");
+    tbody.innerHTML = snap.empty ? `<tr><td colspan="4" class="empty-row">Nenhum buffer</td></tr>` :
+      snap.docs.map(d=>`<tr>
+        <td>${d.data().referenciaPai}</td><td>${d.data().robo}</td><td>${d.data().tempoCobertura}</td>
+        <td class="actions-cell">${can("excluir")?`<button class="btn-icon danger" onclick="deleteItem('buffer_robos','${d.id}',loadBuffer)">🗑</button>`:""}
+        ${can("editar_tudo")?`<button class="btn-icon" onclick="editBuffer('${d.id}')">✏️</button>`:""}
+        </td></tr>`).join("");
+  }
+
+  window.addBuffer = async function() {
+    const ref = document.getElementById("buf-ref").value.trim();
+    const robo = document.getElementById("buf-robo").value.trim();
+    const tempo = document.getElementById("buf-tempo").value.trim();
+    if (!ref||!robo||!tempo) return showToast("Preencha todos os campos","warning");
+    // upsert by referenciaPai
+    const existing = await getDocs(query(collection(db,"buffer_robos"),where("referenciaPai","==",ref)));
+    if (!existing.empty) {
+      await updateDoc(doc(db,"buffer_robos",existing.docs[0].id),{robo,tempoCobertura:tempo});
+    } else {
+      await addDoc(collection(db,"buffer_robos"),{referenciaPai:ref,robo,tempoCobertura:tempo});
+    }
+    document.getElementById("buf-ref").value="";
+    document.getElementById("buf-robo").value="";
+    document.getElementById("buf-tempo").value="";
+    loadBuffer();
+    showToast("Buffer atualizado","success");
+  };
+
+  window.editBuffer = async function(id) {
+    const snap = await getDoc(doc(db,"buffer_robos",id));
+    if (!snap.exists()) return;
+    const b = snap.data();
+    const robo = prompt("Robô:", b.robo);
+    if (robo===null) return;
+    const tempo = prompt("Tempo de cobertura (HH:MM:SS):", b.tempoCobertura);
+    if (tempo===null) return;
+    await updateDoc(doc(db,"buffer_robos",id),{robo,tempoCobertura:tempo});
+    loadBuffer();
+  };
+
+  // Import Excel for buffer
+  window.importBuffer = async function(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async e => {
+      const XLSX = window.XLSX;
+      if (!XLSX) return showToast("XLSX library not loaded","error");
+      const wb = XLSX.read(e.target.result, {type:"array"});
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const data = XLSX.utils.sheet_to_json(ws, {header:1});
+      let count = 0;
+      for (let i=1; i<data.length; i++) {
+        const row = data[i];
+        if (!row[0]) continue;
+        const ref = String(row[0]).trim();
+        const robo = String(row[1]||"").trim();
+        const tempo = String(row[2]||"").trim();
+        if (!ref) continue;
+        const existing = await getDocs(query(collection(db,"buffer_robos"),where("referenciaPai","==",ref)));
+        if (!existing.empty) {
+          await updateDoc(doc(db,"buffer_robos",existing.docs[0].id),{robo,tempoCobertura:tempo});
+        } else {
+          await addDoc(collection(db,"buffer_robos"),{referenciaPai:ref,robo,tempoCobertura:tempo});
+        }
+        count++;
+      }
+      loadBuffer();
+      showToast(`${count} registros importados!`,"success");
+    };
+    reader.readAsArrayBuffer(file);
+    event.target.value="";
+  };
+
+  window.deleteItem = async function(coll, id, reloadFn) {
+    if (!can("excluir")) return showToast("Sem permissão","error");
+    if (!confirm("Excluir este item?")) return;
+    await deleteDoc(doc(db,coll,id));
+    reloadFn();
+    showToast("Excluído","success");
+  };
+
+  // ============================================================
+  // USUÁRIOS / PERMISSÕES
+  // ============================================================
+  async function loadUsuarios() {
+    const snap = await getDocs(collection(db,"usuarios"));
+    const tbody = document.getElementById("users-tbody");
+    const permMap = {
+      visualizador:"Visualizador", operador:"Operador",
+      adm_basico:"ADM Básico", adm_master:"ADM Master"
+    };
+    tbody.innerHTML = snap.empty ? `<tr><td colspan="5" class="empty-row">Nenhum usuário</td></tr>` :
+      snap.docs.map(d=>{
+        const u = d.data();
+        return `<tr>
+          <td>${u.nome}</td><td>${u.email}</td>
+          <td><span class="badge-turno">${u.turno||""}</span></td>
+          <td><span class="badge-perm ${u.permissao}">${permMap[u.permissao]||u.permissao}</span></td>
+          <td class="actions-cell">
+            <select class="perm-select" onchange="changePermissao('${d.id}',this.value)">
+              <option value="visualizador" ${u.permissao==='visualizador'?'selected':''}>Visualizador</option>
+              <option value="operador" ${u.permissao==='operador'?'selected':''}>Operador</option>
+              <option value="adm_basico" ${u.permissao==='adm_basico'?'selected':''}>ADM Básico</option>
+              <option value="adm_master" ${u.permissao==='adm_master'?'selected':''}>ADM Master</option>
+            </select>
+          </td>
+        </tr>`;
+      }).join("");
+  }
+
+  window.changePermissao = async function(uid, perm) {
+    if (!can("gerenciar_usuarios")) return showToast("Sem permissão","error");
+    await updateDoc(doc(db,"usuarios",uid),{permissao:perm});
+    showToast("Permissão atualizada","success");
+    loadUsuarios();
+  };
+
+  // Master password modal
+  window.openMasterModal = function() {
+    document.getElementById("modal-master").style.display="flex";
+  };
+  window.closeMasterModal = function() {
+    document.getElementById("modal-master").style.display="none";
+  };
+  window.applyMasterPassword = async function() {
+    const pass = document.getElementById("master-pass-input").value;
+    if (pass === MASTER_PASSWORD) {
+      // Grant current user ADM Master
+      await updateDoc(doc(db,"usuarios",currentUser.uid),{permissao:"adm_master"});
+      const snap = await getDoc(doc(db,"usuarios",currentUser.uid));
+      currentUserData = snap.data();
+      showToast("Você agora é ADM Master!","success");
+      closeMasterModal();
+      document.getElementById("nav-usuarios").style.display="flex";
+      navigate("usuarios");
+    } else {
+      showToast("Senha incorreta","error");
+    }
+    document.getElementById("master-pass-input").value="";
+  };
+
+  // ============================================================
+  // EXPORT
+  // ============================================================
+  window.exportTable = async function(tableId, filename) {
+    const XLSX = window.XLSX;
+    if (!XLSX) return showToast("Biblioteca XLSX não carregada","error");
+    const table = document.getElementById(tableId);
+    if (!table) return;
+    const wb = XLSX.utils.table_to_book(table, {sheet:"Dados"});
+    XLSX.writeFile(wb, filename+".xlsx");
+  };
+
+  window.exportCSV = function(tableId, filename) {
+    const table = document.getElementById(tableId);
+    if (!table) return;
+    const rows = Array.from(table.querySelectorAll("tr"));
+    const csv = rows.map(r => Array.from(r.querySelectorAll("th,td")).map(c => `"${c.innerText.replace(/"/g,'""')}"`).join(",")).join("\n");
+    const blob = new Blob(["\uFEFF"+csv],{type:"text/csv;charset=utf-8;"});
+    const a = document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=filename+".csv"; a.click();
+  };
+
+  // ============================================================
+  // INIT
+  // ============================================================
+  document.addEventListener("DOMContentLoaded", () => {
+    initMotivos();
+    // Toggle password visibility
+    document.querySelectorAll(".toggle-pass").forEach(btn=>{
+      btn.addEventListener("click",()=>{
+        const inp = btn.previousElementSibling;
+        inp.type = inp.type==="password"?"text":"password";
+        btn.textContent = inp.type==="password"?"👁":"🙈";
+      });
+    });
+    // Enter key on login
+    document.getElementById("login-pass").addEventListener("keydown",e=>{ if(e.key==="Enter") doLogin(); });
+  });
+
+  // expose navigate globally
+  window.navigate = navigate;
+  window.showAuthPanel = showAuthPanel;
+  window.initMotivos = initMotivos;
+  window.loadMotivos = loadMotivos;
+  window.loadBuffer = loadBuffer;
+  window.loadRobos = loadRobos;
+  window.loadOperadores = loadOperadores;
+</script>
+
+<!-- SheetJS for Excel import/export -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+
+<style>
+/* ============================================================
+   DESIGN: Industrial Precision — dark steel + amber accents
+   ============================================================ */
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Inter:wght@300;400;500&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0d1117;
+  --bg2: #161b22;
+  --bg3: #21262d;
+  --bg4: #2d333b;
+  --border: #30363d;
+  --border2: #444c56;
+  --text: #e6edf3;
+  --text2: #8b949e;
+  --text3: #6e7681;
+  --amber: #f0a500;
+  --amber2: #e08c00;
+  --amber-glow: rgba(240,165,0,0.15);
+  --green: #3fb950;
+  --red: #f85149;
+  --blue: #58a6ff;
+  --purple: #bc8cff;
+  --teal: #39d353;
+  --radius: 6px;
+  --radius2: 10px;
+}
+
+html, body { height: 100%; font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
+
+/* ---- AUTH ---- */
+#auth-section {
+  min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  background: var(--bg);
+  background-image: repeating-linear-gradient(0deg,transparent,transparent 39px,var(--border) 39px,var(--border) 40px),
+    repeating-linear-gradient(90deg,transparent,transparent 39px,var(--border) 39px,var(--border) 40px);
+}
+
+.auth-card {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius2);
+  width: 420px; padding: 40px;
+  box-shadow: 0 0 60px rgba(0,0,0,0.6), 0 0 0 1px var(--border2);
+}
+
+.auth-logo {
+  font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 28px;
+  color: var(--amber); letter-spacing: 4px; text-transform: uppercase;
+  margin-bottom: 4px;
+}
+.auth-subtitle { color: var(--text3); font-size: 12px; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 32px; }
+
+.auth-panel { display: none; }
+
+.field-group { margin-bottom: 16px; }
+.field-group label { display: block; font-size: 11px; font-weight: 500; letter-spacing: 1px; text-transform: uppercase; color: var(--text2); margin-bottom: 6px; }
+.field-row { position: relative; display: flex; }
+.field-row input { flex: 1; }
+
+input[type="text"], input[type="email"], input[type="password"], input[type="number"], input[type="date"], select, textarea {
+  width: 100%; background: var(--bg3); border: 1px solid var(--border); border-radius: var(--radius);
+  color: var(--text); padding: 10px 12px; font-family: inherit; font-size: 14px; transition: border-color .2s;
+  outline: none;
+}
+input:focus, select:focus, textarea:focus { border-color: var(--amber); box-shadow: 0 0 0 3px var(--amber-glow); }
+select { cursor: pointer; }
+
+.toggle-pass {
+  background: var(--bg4); border: 1px solid var(--border); border-left: none;
+  border-radius: 0 var(--radius) var(--radius) 0; padding: 0 10px; cursor: pointer;
+  color: var(--text2); font-size: 16px; transition: background .2s;
+}
+.toggle-pass:hover { background: var(--border); }
+
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  padding: 10px 20px; border-radius: var(--radius); border: none; cursor: pointer;
+  font-family: 'Rajdhani', sans-serif; font-weight: 600; font-size: 14px; letter-spacing: 1px;
+  text-transform: uppercase; transition: all .2s; }
+
+.btn-primary { background: var(--amber); color: #000; }
+.btn-primary:hover { background: var(--amber2); transform: translateY(-1px); box-shadow: 0 4px 16px var(--amber-glow); }
+
+.btn-ghost { background: transparent; color: var(--text2); border: 1px solid var(--border); }
+.btn-ghost:hover { border-color: var(--amber); color: var(--amber); }
+
+.btn-danger { background: var(--red); color: #fff; }
+.btn-danger:hover { opacity: .85; }
+
+.btn-sm { padding: 6px 14px; font-size: 12px; }
+.btn-full { width: 100%; }
+
+.auth-links { margin-top: 16px; display: flex; flex-direction: column; gap: 8px; align-items: center; }
+.auth-link { background: none; border: none; color: var(--amber); font-size: 13px; cursor: pointer; text-decoration: underline; }
+
+/* ---- APP LAYOUT ---- */
+#app-section { display: none; flex-direction: column; height: 100vh; }
+
+.topbar {
+  background: var(--bg2); border-bottom: 1px solid var(--border);
+  padding: 0 24px; height: 56px; display: flex; align-items: center; justify-content: space-between;
+  flex-shrink: 0;
+}
+.topbar-brand { font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 20px; color: var(--amber); letter-spacing: 3px; }
+.topbar-right { display: flex; align-items: center; gap: 16px; }
+.user-info { display: flex; flex-direction: column; align-items: flex-end; }
+.user-name { font-size: 13px; font-weight: 500; color: var(--text); }
+.user-turno { font-size: 11px; color: var(--amber); font-family: 'IBM Plex Mono', monospace; }
+
+.nav-bar {
+  background: var(--bg2); border-bottom: 1px solid var(--border);
+  display: flex; padding: 0 24px; gap: 2px; flex-shrink: 0; overflow-x: auto;
+}
+.nav-btn {
+  display: flex; align-items: center; gap: 6px; padding: 0 16px; height: 44px;
+  background: none; border: none; cursor: pointer; font-family: 'Rajdhani', sans-serif;
+  font-weight: 600; font-size: 13px; letter-spacing: .5px; text-transform: uppercase;
+  color: var(--text2); border-bottom: 2px solid transparent; transition: all .2s; white-space: nowrap;
+}
+.nav-btn:hover { color: var(--text); }
+.nav-btn.active { color: var(--amber); border-bottom-color: var(--amber); }
+.nav-icon { font-size: 16px; }
+
+.app-body { flex: 1; overflow-y: auto; padding: 24px; }
+
+/* ---- SCREENS ---- */
+.screen { display: none; }
+.screen.active { display: block; }
+
+/* ---- PAGE HEADER ---- */
+.page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; flex-wrap: wrap; gap: 12px; }
+.page-title { font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 22px; color: var(--text); letter-spacing: 1px; }
+.page-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ---- FORM CARD ---- */
+.form-card {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius2);
+  padding: 24px; margin-bottom: 24px;
+}
+.form-card-title { font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 16px; letter-spacing: 1px; color: var(--amber); text-transform: uppercase; margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+
+.form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; }
+.form-grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.field-label { display: block; font-size: 11px; font-weight: 500; letter-spacing: 1px; text-transform: uppercase; color: var(--text2); margin-bottom: 6px; }
+.field-label .required { color: var(--amber); }
+
+/* ---- TABLE ---- */
+.table-container { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius2); overflow: hidden; }
+.table-toolbar { padding: 14px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.table-toolbar input, .table-toolbar select { width: auto; min-width: 140px; padding: 6px 10px; font-size: 13px; }
+
+.data-table { width: 100%; border-collapse: collapse; min-width: 900px; }
+.table-scroll { overflow-x: auto; }
+.data-table th {
+  background: var(--bg3); padding: 10px 12px; text-align: left;
+  font-family: 'Rajdhani', sans-serif; font-size: 11px; font-weight: 700;
+  letter-spacing: 1px; text-transform: uppercase; color: var(--text2);
+  border-bottom: 1px solid var(--border); white-space: nowrap; cursor: pointer;
+}
+.data-table th:hover { color: var(--amber); }
+.data-table td { padding: 9px 12px; border-bottom: 1px solid var(--border); color: var(--text); font-size: 13px; white-space: nowrap; }
+.data-table tr:last-child td { border-bottom: none; }
+.data-table tr:hover td { background: var(--bg3); }
+.data-table tr.row-solved td { background: rgba(63,185,80,0.04); }
+.data-table tr.row-pending td { background: rgba(248,81,73,0.04); }
+
+.empty-row, .loading-row { text-align: center; color: var(--text3); padding: 32px; font-style: italic; }
+
+/* ---- BADGES ---- */
+.badge-checklist { background: var(--amber-glow); color: var(--amber); padding: 2px 8px; border-radius: 4px; font-family: 'IBM Plex Mono', monospace; font-size: 12px; border: 1px solid rgba(240,165,0,0.3); }
+.badge-turno { background: rgba(88,166,255,0.1); color: var(--blue); padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; letter-spacing: .5px; text-transform: uppercase; }
+.badge-lead { background: var(--bg3); color: var(--text2); padding: 2px 8px; border-radius: 4px; font-family: 'IBM Plex Mono', monospace; font-size: 11px; border: 1px solid var(--border); }
+.badge-tratativa.solved { background: rgba(63,185,80,0.15); color: var(--green); padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; letter-spacing: .5px; }
+.badge-tratativa.pending { background: rgba(248,81,73,0.15); color: var(--red); padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; letter-spacing: .5px; }
+.badge-perm.adm_master { background: rgba(240,165,0,0.2); color: var(--amber); padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+.badge-perm.adm_basico { background: rgba(188,140,255,0.15); color: var(--purple); padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+.badge-perm.operador { background: rgba(88,166,255,0.15); color: var(--blue); padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+.badge-perm.visualizador { background: var(--bg3); color: var(--text2); padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 700; }
+
+/* ---- INLINE EDIT ---- */
+.inline-edit { background: transparent; border: 1px dashed var(--border2); border-radius: 4px; color: var(--text); padding: 3px 6px; font-size: 13px; min-width: 100px; }
+.inline-edit:focus { border-color: var(--amber); background: var(--bg3); }
+
+.actions-cell { width: 80px; }
+.btn-icon { background: none; border: none; cursor: pointer; font-size: 15px; padding: 4px; border-radius: 4px; transition: background .2s; }
+.btn-icon:hover { background: var(--bg4); }
+.btn-icon.danger:hover { background: rgba(248,81,73,0.15); }
+
+/* ---- MODAL ---- */
+.modal-overlay {
+  display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+  z-index: 1000; align-items: center; justify-content: center;
+}
+.modal-box {
+  background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius2);
+  width: 480px; max-width: 95vw; padding: 32px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+}
+.modal-title { font-family: 'Rajdhani', sans-serif; font-weight: 700; font-size: 18px; color: var(--amber); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 24px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+
+/* ---- CADASTROS TABS ---- */
+.cad-tabs { display: flex; gap: 2px; margin-bottom: 20px; border-bottom: 1px solid var(--border); }
+.cad-tab { padding: 8px 16px; background: none; border: none; cursor: pointer; font-family: 'Rajdhani', sans-serif; font-weight: 600; font-size: 13px; letter-spacing: .5px; text-transform: uppercase; color: var(--text2); border-bottom: 2px solid transparent; transition: all .2s; }
+.cad-tab:hover { color: var(--text); }
+.cad-tab.active { color: var(--amber); border-bottom-color: var(--amber); }
+.cad-panel { display: none; }
+.cad-panel.active { display: block; }
+
+/* ---- TOAST ---- */
+#toast-container { position: fixed; bottom: 24px; right: 24px; z-index: 9999; display: flex; flex-direction: column; gap: 8px; }
+.toast { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 20px; min-width: 260px; font-size: 13px; opacity: 0; transform: translateX(20px); transition: all .3s; box-shadow: 0 4px 20px rgba(0,0,0,0.4); }
+.toast.show { opacity: 1; transform: translateX(0); }
+.toast-success { border-left: 3px solid var(--green); }
+.toast-error { border-left: 3px solid var(--red); }
+.toast-warning { border-left: 3px solid var(--amber); }
+.toast-info { border-left: 3px solid var(--blue); }
+
+/* ---- LOADING ---- */
+#global-loading { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 9998; align-items: center; justify-content: center; }
+.spinner { width: 40px; height: 40px; border: 3px solid var(--border); border-top-color: var(--amber); border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.perm-select { width: auto; min-width: 140px; padding: 4px 8px; font-size: 12px; }
+
+.section-sep { height: 1px; background: var(--border); margin: 20px 0; }
+.text-muted { color: var(--text3); font-size: 12px; }
+
+.info-box { background: var(--amber-glow); border: 1px solid rgba(240,165,0,0.3); border-radius: var(--radius); padding: 12px 16px; font-size: 13px; color: var(--amber); margin-bottom: 16px; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text3); }
+
+@media (max-width: 640px) {
+  .form-grid, .form-grid-3 { grid-template-columns: 1fr; }
+  .auth-card { width: 95vw; padding: 24px; }
+}
+</style>
+</head>
+<body>
+
+<!-- GLOBAL LOADING -->
+<div id="global-loading"><div class="spinner"></div></div>
+
+<!-- TOAST -->
+<div id="toast-container"></div>
+
+<!-- ============================================================
+     AUTH SECTION
+     ============================================================ -->
+<div id="auth-section">
+  <div class="auth-card">
+    <div class="auth-logo">KitControl</div>
+    <div class="auth-subtitle">Magius — Controle de Kits</div>
+
+    <!-- LOGIN -->
+    <div class="auth-panel" id="auth-login">
+      <div class="field-group">
+        <label>E-mail</label>
+        <input type="email" id="login-email" placeholder="seu@email.com" />
+      </div>
+      <div class="field-group">
+        <label>Senha</label>
+        <div class="field-row">
+          <input type="password" id="login-pass" placeholder="••••••••" />
+          <button class="toggle-pass" type="button">👁</button>
+        </div>
+      </div>
+      <button class="btn btn-primary btn-full" onclick="doLogin()">Entrar</button>
+      <div class="auth-links">
+        <button class="auth-link" onclick="showAuthPanel('forgot')">Esqueci minha senha</button>
+        <button class="auth-link" onclick="showAuthPanel('register')">Cadastrar novo usuário</button>
+      </div>
+    </div>
+
+    <!-- REGISTER -->
+    <div class="auth-panel" id="auth-register">
+      <div class="field-group"><label>Nome completo</label><input type="text" id="reg-nome" placeholder="Nome" /></div>
+      <div class="field-group"><label>E-mail</label><input type="email" id="reg-email" placeholder="seu@email.com" /></div>
+      <div class="field-group">
+        <label>Senha</label>
+        <div class="field-row"><input type="password" id="reg-pass" placeholder="Mínimo 6 caracteres" /><button class="toggle-pass" type="button">👁</button></div>
+      </div>
+      <div class="field-group">
+        <label>Repetir senha</label>
+        <div class="field-row"><input type="password" id="reg-pass2" placeholder="Repita a senha" /><button class="toggle-pass" type="button">👁</button></div>
+      </div>
+      <div class="field-group">
+        <label>Turno</label>
+        <select id="reg-turno">
+          <option value="">Selecione...</option>
+          <option value="1º Turno">1º Turno</option>
+          <option value="2º Turno">2º Turno</option>
+          <option value="3º Turno">3º Turno</option>
+        </select>
+      </div>
+      <button class="btn btn-primary btn-full" onclick="doRegister()">Cadastrar</button>
+      <div class="auth-links"><button class="auth-link" onclick="showAuthPanel('login')">← Voltar ao login</button></div>
+    </div>
+
+    <!-- FORGOT -->
+    <div class="auth-panel" id="auth-forgot">
+      <div class="info-box">Informe seu e-mail para receber o link de redefinição de senha.</div>
+      <div class="field-group"><label>E-mail</label><input type="email" id="forgot-email" placeholder="seu@email.com" /></div>
+      <button class="btn btn-primary btn-full" onclick="doForgotPassword()">Enviar link</button>
+      <div class="auth-links"><button class="auth-link" onclick="showAuthPanel('login')">← Voltar ao login</button></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     APP SECTION
+     ============================================================ -->
+<div id="app-section">
+  <!-- TOPBAR -->
+  <div class="topbar">
+    <div class="topbar-brand">⬡ KitControl</div>
+    <div class="topbar-right">
+      <div class="user-info">
+        <span class="user-name" id="user-name-display">—</span>
+        <span class="user-turno" id="user-turno-display">—</span>
+      </div>
+      <button class="btn btn-ghost btn-sm" onclick="openMasterModal()">🔑 Master</button>
+      <button class="btn btn-ghost btn-sm" onclick="doLogout()">Sair</button>
+    </div>
+  </div>
+
+  <!-- NAV -->
+  <div class="nav-bar">
+    <button class="nav-btn" data-nav="recebimento" onclick="navigate('recebimento')"><span class="nav-icon">📥</span>Recebimento</button>
+    <button class="nav-btn" data-nav="kits" onclick="navigate('kits')"><span class="nav-icon">📦</span>Kits Aguardando</button>
+    <button class="nav-btn" data-nav="historico" onclick="navigate('historico')"><span class="nav-icon">✅</span>Histórico Entregues</button>
+    <button class="nav-btn" data-nav="divergencia" onclick="navigate('divergencia')"><span class="nav-icon">⚠️</span>Registrar Divergência</button>
+    <button class="nav-btn" data-nav="divergencias" onclick="navigate('divergencias')"><span class="nav-icon">📋</span>Histórico Divergências</button>
+    <button class="nav-btn" data-nav="cadastros" onclick="navigate('cadastros')"><span class="nav-icon">⚙️</span>Cadastros</button>
+    <button class="nav-btn" data-nav="usuarios" id="nav-usuarios" onclick="navigate('usuarios')" style="display:none;"><span class="nav-icon">👥</span>Usuários</button>
+  </div>
+
+  <!-- APP BODY -->
+  <div class="app-body">
+
+    <!-- ======== SCREEN: RECEBIMENTO ======== -->
+    <div class="screen" id="screen-recebimento">
+      <div class="page-header">
+        <div class="page-title">📥 Recebimento de Kit</div>
+      </div>
+      <div class="form-card">
+        <div class="form-card-title">Registrar Recebimento</div>
+        <form id="form-recebimento" onsubmit="event.preventDefault(); submitRecebimento()">
+          <div class="form-grid">
+            <div>
+              <label class="field-label">Data Prev/Entrega <span class="required">*</span></label>
+              <input type="date" id="rec-dataprev" required />
+            </div>
+            <div>
+              <label class="field-label">Checklist <span class="required">*</span></label>
+              <input type="text" id="rec-checklist" placeholder="Nº do checklist" required />
+            </div>
+            <div>
+              <label class="field-label">Nº OP <span class="required">*</span></label>
+              <input type="text" id="rec-noop" placeholder="Número OP" required />
+            </div>
+            <div>
+              <label class="field-label">Referência Pai <span class="required">*</span></label>
+              <input type="text" id="rec-refpai" placeholder="Ref. Pai" required />
+            </div>
+            <div>
+              <label class="field-label">Quantidade Kit <span class="required">*</span></label>
+              <input type="number" id="rec-qtdkit" placeholder="Qtd" min="1" required />
+            </div>
+            <div>
+              <label class="field-label">Volumes <span class="required">*</span></label>
+              <input type="number" id="rec-volumes" placeholder="Volumes" min="1" required />
+            </div>
+            <div>
+              <label class="field-label">Endereço <span class="required">*</span></label>
+              <input type="text" id="rec-endereco" placeholder="Endereço" required />
+            </div>
+          </div>
+          <div style="margin-top:20px;">
+            <button type="submit" class="btn btn-primary">Registrar Recebimento</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- ======== SCREEN: KITS AGUARDANDO ======== -->
+    <div class="screen" id="screen-kits">
+      <div class="page-header">
+        <div class="page-title">📦 Kits Aguardando Entrega</div>
+        <div class="page-actions">
+          <button class="btn btn-primary btn-sm" onclick="openEntregarModal()">🚀 Entregar para Produção</button>
+          <button class="btn btn-ghost btn-sm" onclick="exportTable('table-kits','kits_aguardando')">⬇ Excel</button>
+          <button class="btn btn-ghost btn-sm" onclick="exportCSV('table-kits','kits_aguardando')">⬇ CSV</button>
+        </div>
+      </div>
+      <div class="table-container">
+        <div class="table-toolbar">
+          <input type="date" id="filter-kits-data" placeholder="Data" onchange="applyKitsFilter()" />
+          <input type="text" id="filter-kits-checklist" placeholder="🔍 Checklist" oninput="applyKitsFilter()" />
+          <input type="text" id="filter-kits-refpai" placeholder="🔍 Ref. Pai" oninput="applyKitsFilter()" />
+          <input type="text" id="filter-kits-posto" placeholder="🔍 Posto de Solda" oninput="applyKitsFilter()" />
+          <input type="text" id="filter-kits-endereco" placeholder="🔍 Endereço" oninput="applyKitsFilter()" />
+        </div>
+        <div class="table-scroll">
+          <table class="data-table" id="table-kits">
+            <thead><tr>
+              <th>Data Registro</th><th>Hora</th><th>Checklist</th><th>Nº OP</th>
+              <th>Ref. Pai</th><th>Qtd Kit</th><th>Turno Receb.</th><th>Conferido Por</th>
+              <th>Volumes</th><th>Posto de Solda</th><th>T. Cobertura</th><th>Endereço</th><th></th>
+            </tr></thead>
+            <tbody id="kits-tbody"><tr><td colspan="13" class="loading-row">Carregando...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ======== SCREEN: HISTÓRICO ENTREGUES ======== -->
+    <div class="screen" id="screen-historico">
+      <div class="page-header">
+        <div class="page-title">✅ Histórico de Checklist Entregues</div>
+        <div class="page-actions">
+          <button class="btn btn-ghost btn-sm" onclick="exportTable('table-hist','historico_entregues')">⬇ Excel</button>
+          <button class="btn btn-ghost btn-sm" onclick="exportCSV('table-hist','historico_entregues')">⬇ CSV</button>
+        </div>
+      </div>
+      <div class="table-container">
+        <div class="table-toolbar">
+          <input type="date" id="filter-hist-data" placeholder="Data" onchange="applyHistFilter()" />
+          <input type="text" id="filter-hist-checklist" placeholder="🔍 Checklist" oninput="applyHistFilter()" />
+        </div>
+        <div class="table-scroll">
+          <table class="data-table" id="table-hist">
+            <thead><tr>
+              <th>Data Registro</th><th>Hora</th><th>Checklist</th><th>Nº OP</th>
+              <th>Ref. Pai</th><th>Qtd Kit</th><th>Turno Receb.</th><th>Conferido Por</th>
+              <th>Volumes</th><th>Posto de Solda</th><th>T. Cobertura</th><th>Endereço</th>
+              <th>Data Entrega</th><th>Hora Entrega</th><th>Entregue Por</th><th>Turno Entrega</th>
+              <th>Entregue Para</th><th>Lead Time</th><th></th>
+            </tr></thead>
+            <tbody id="hist-tbody"><tr><td colspan="19" class="loading-row">Carregando...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ======== SCREEN: REGISTRAR DIVERGÊNCIA ======== -->
+    <div class="screen" id="screen-divergencia">
+      <div class="page-header">
+        <div class="page-title">⚠️ Registrar Divergência</div>
+      </div>
+      <div class="form-card">
+        <div class="form-card-title">Novo Registro de Divergência</div>
+        <form id="form-divergencia" onsubmit="event.preventDefault(); submitDivergencia()">
+          <div class="form-grid">
+            <div>
+              <label class="field-label">Data Prev/Entrega <span class="required">*</span></label>
+              <input type="date" id="div-dataprev" required />
+            </div>
+            <div>
+              <label class="field-label">Checklist <span class="required">*</span></label>
+              <input type="text" id="div-checklist" placeholder="Nº do checklist" required />
+            </div>
+            <div>
+              <label class="field-label">Nº OP <span class="required">*</span></label>
+              <input type="text" id="div-noop" placeholder="Número OP" required />
+            </div>
+            <div>
+              <label class="field-label">Referência Pai <span class="required">*</span></label>
+              <input type="text" id="div-refpai" placeholder="Ref. Pai" required />
+            </div>
+            <div>
+              <label class="field-label">Quantidade Kit <span class="required">*</span></label>
+              <input type="number" id="div-qtd" placeholder="Qtd" min="1" required />
+            </div>
+            <div>
+              <label class="field-label">Motivo Divergência <span class="required">*</span></label>
+              <select id="div-motivo" required>
+                <option value="">Selecione...</option>
+              </select>
+            </div>
+            <div>
+              <label class="field-label">Código da Peça</label>
+              <input type="text" id="div-codpeca" placeholder="Código" />
+            </div>
+            <div>
+              <label class="field-label">Qtd de Peças</label>
+              <input type="number" id="div-qntpecas" placeholder="Qtd peças" />
+            </div>
+            <div>
+              <label class="field-label">Responsável do Kit</label>
+              <input type="text" id="div-respkit" placeholder="Nome" />
+            </div>
+          </div>
+          <div style="margin-top:20px;">
+            <button type="submit" class="btn btn-danger">Registrar Divergência</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- ======== SCREEN: HISTÓRICO DIVERGÊNCIAS ======== -->
+    <div class="screen" id="screen-divergencias">
+      <div class="page-header">
+        <div class="page-title">📋 Histórico de Divergências</div>
+        <div class="page-actions">
+          <button class="btn btn-ghost btn-sm" onclick="exportTable('table-div','divergencias')">⬇ Excel</button>
+          <button class="btn btn-ghost btn-sm" onclick="exportCSV('table-div','divergencias')">⬇ CSV</button>
+        </div>
+      </div>
+      <div class="table-container">
+        <div class="table-toolbar">
+          <input type="date" id="filter-div-data" onchange="applyDivFilter()" />
+          <input type="text" id="filter-div-checklist" placeholder="🔍 Checklist" oninput="applyDivFilter()" />
+          <input type="text" id="filter-div-refpai" placeholder="🔍 Ref. Pai" oninput="applyDivFilter()" />
+          <input type="text" id="filter-div-motivo" placeholder="🔍 Motivo" oninput="applyDivFilter()" />
+          <select id="filter-div-tratativa" onchange="applyDivFilter()">
+            <option value="">Todas tratativas</option>
+            <option value="PENDENTE">Pendente</option>
+            <option value="SOLUCIONADO">Solucionado</option>
+          </select>
+        </div>
+        <div class="table-scroll">
+          <table class="data-table" id="table-div">
+            <thead><tr>
+              <th>Data Registro</th><th>Hora</th><th>Dt Prev Entrega</th><th>Checklist</th>
+              <th>Nº OP</th><th>Ref. Pai</th><th>Qtd</th><th>Motivo Divergência</th>
+              <th>Cód Peça</th><th>Qtd Peças</th><th>Responsável Kit</th>
+              <th>Turno</th><th>Conferente</th><th>Tratativa</th><th>Lead Time</th><th></th>
+            </tr></thead>
+            <tbody id="div-tbody"><tr><td colspan="16" class="loading-row">Carregando...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ======== SCREEN: CADASTROS ======== -->
+    <div class="screen" id="screen-cadastros">
+      <div class="page-header"><div class="page-title">⚙️ Cadastros</div></div>
+
+      <div class="cad-tabs">
+        <button class="cad-tab active" onclick="switchCadTab('operadores',this)">Operadores</button>
+        <button class="cad-tab" onclick="switchCadTab('motivos',this)">Motivos Divergência</button>
+        <button class="cad-tab" onclick="switchCadTab('robos',this)">Robôs</button>
+        <button class="cad-tab" onclick="switchCadTab('buffer',this)">Buffer Robôs</button>
+      </div>
+
+      <!-- Operadores -->
+      <div class="cad-panel active" id="cad-operadores">
+        <div class="form-card">
+          <div class="form-card-title">Novo Operador</div>
+          <div class="form-grid">
+            <div><label class="field-label">Nome</label><input type="text" id="op-nome" placeholder="Nome do operador" /></div>
+            <div><label class="field-label">Setor</label><input type="text" id="op-setor" placeholder="Setor" /></div>
+          </div>
+          <div style="margin-top:16px;"><button class="btn btn-primary btn-sm" onclick="addOperador()">+ Adicionar</button></div>
+        </div>
+        <div class="table-container">
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead><tr><th>Nome</th><th>Setor</th><th></th></tr></thead>
+              <tbody id="op-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Motivos -->
+      <div class="cad-panel" id="cad-motivos">
+        <div class="form-card">
+          <div class="form-card-title">Novo Motivo</div>
+          <div class="form-grid">
+            <div><label class="field-label">Motivo</label><input type="text" id="motivo-novo" placeholder="Descrição do motivo" /></div>
+          </div>
+          <div style="margin-top:16px;"><button class="btn btn-primary btn-sm" onclick="addMotivo()">+ Adicionar</button></div>
+        </div>
+        <div class="table-container">
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead><tr><th>Motivo</th><th></th></tr></thead>
+              <tbody id="motivos-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Robôs -->
+      <div class="cad-panel" id="cad-robos">
+        <div class="form-card">
+          <div class="form-card-title">Novo Robô</div>
+          <div class="form-grid">
+            <div><label class="field-label">ID Robô</label><input type="text" id="robo-id" placeholder="ID" /></div>
+            <div><label class="field-label">OEE (%)</label><input type="number" id="robo-oee" placeholder="Ex: 85" min="0" max="100" /></div>
+            <div><label class="field-label">Turnos Trabalhados</label><input type="number" id="robo-turnos" placeholder="Ex: 3" min="1" /></div>
+            <div><label class="field-label">Horas por Turno</label><input type="number" id="robo-horas" placeholder="Ex: 8" min="1" /></div>
+          </div>
+          <div style="margin-top:16px; display:flex; gap:8px; align-items:center;">
+            <button class="btn btn-primary btn-sm" onclick="addRobo()">+ Adicionar</button>
+            <span class="text-muted">Total Horas = (Horas × Turnos) × (OEE/100)</span>
+          </div>
+        </div>
+        <div class="table-container">
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead><tr><th>ID Robô</th><th>OEE</th><th>Turnos</th><th>H/Turno</th><th>Total Efetivo</th><th></th></tr></thead>
+              <tbody id="robos-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Buffer -->
+      <div class="cad-panel" id="cad-buffer">
+        <div class="form-card">
+          <div class="form-card-title">Buffer Robôs — Ref. Pai × Robô × Tempo Cobertura</div>
+          <div class="form-grid">
+            <div><label class="field-label">Referência Pai</label><input type="text" id="buf-ref" placeholder="Ref. Pai" /></div>
+            <div><label class="field-label">Robô</label><input type="text" id="buf-robo" placeholder="ID Robô" /></div>
+            <div><label class="field-label">Tempo Cobertura (HH:MM:SS)</label><input type="text" id="buf-tempo" placeholder="Ex: 02:30:00" /></div>
+          </div>
+          <div style="margin-top:16px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <button class="btn btn-primary btn-sm" onclick="addBuffer()">+ Adicionar / Atualizar</button>
+            <div style="display:flex;align-items:center;gap:8px;">
+              <label class="btn btn-ghost btn-sm" style="cursor:pointer;">
+                📊 Importar Planilha
+                <input type="file" accept=".xlsx,.xls" onchange="importBuffer(event)" style="display:none;" />
+              </label>
+              <span class="text-muted">Colunas: REFERENCIA PAI | ROBO | TEMPO COBERTURA</span>
+            </div>
+          </div>
+        </div>
+        <div class="table-container">
+          <div class="table-scroll">
+            <table class="data-table">
+              <thead><tr><th>Referência Pai</th><th>Robô</th><th>Tempo Cobertura</th><th></th></tr></thead>
+              <tbody id="buffer-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ======== SCREEN: USUÁRIOS ======== -->
+    <div class="screen" id="screen-usuarios">
+      <div class="page-header"><div class="page-title">👥 Gerenciar Usuários</div></div>
+      <div class="table-container">
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead><tr><th>Nome</th><th>E-mail</th><th>Turno</th><th>Permissão</th><th>Alterar Permissão</th></tr></thead>
+            <tbody id="users-tbody"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /app-body -->
+</div><!-- /app-section -->
+
+<!-- ============================================================
+     MODAL: ENTREGAR KIT
+     ============================================================ -->
+<div class="modal-overlay" id="modal-entregar">
+  <div class="modal-box">
+    <div class="modal-title">🚀 Entregar para Produção</div>
+    <div class="field-group">
+      <label class="field-label">Checklist <span class="required">*</span></label>
+      <select id="entregar-checklist">
+        <option value="">Selecione ou pesquise...</option>
+      </select>
+    </div>
+    <div class="field-group">
+      <label class="field-label">Entregue Por</label>
+      <input type="text" id="entregar-por" readonly style="opacity:.7;" />
+    </div>
+    <div class="field-group">
+      <label class="field-label">Turno</label>
+      <input type="text" id="entregar-turno" readonly style="opacity:.7;" />
+    </div>
+    <div class="field-group">
+      <label class="field-label">Entregue Para (Operador) <span class="required">*</span></label>
+      <select id="entregar-para">
+        <option value="">Selecione operador...</option>
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeEntregarModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="confirmarEntrega()">✓ Confirmar Entrega</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     MODAL: MASTER PASSWORD
+     ============================================================ -->
+<div class="modal-overlay" id="modal-master">
+  <div class="modal-box">
+    <div class="modal-title">🔑 Senha Master</div>
+    <p style="color:var(--text2); margin-bottom:20px; font-size:13px;">Digite a senha master para elevar permissões ou gerenciar usuários.</p>
+    <div class="field-group">
+      <label class="field-label">Senha Master</label>
+      <div class="field-row">
+        <input type="password" id="master-pass-input" placeholder="Senha master" />
+        <button class="toggle-pass" type="button" onclick="
+          const inp=document.getElementById('master-pass-input');
+          inp.type=inp.type==='password'?'text':'password';
+          this.textContent=inp.type==='password'?'👁':'🙈';
+        ">👁</button>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeMasterModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="applyMasterPassword()">Confirmar</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// Cadastros tab switch
+function switchCadTab(tab, el) {
+  document.querySelectorAll(".cad-tab").forEach(t=>t.classList.remove("active"));
+  document.querySelectorAll(".cad-panel").forEach(p=>p.classList.remove("active"));
+  el.classList.add("active");
+  document.getElementById("cad-"+tab).classList.add("active");
+}
+
+// Close modal on overlay click
+document.querySelectorAll(".modal-overlay").forEach(m => {
+  m.addEventListener("click", e => { if(e.target===m) m.style.display="none"; });
+});
+</script>
+
+</body>
+</html>
